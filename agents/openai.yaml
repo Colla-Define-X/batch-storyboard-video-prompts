@@ -1,0 +1,6 @@
+interface:
+  display_name: "批量四宫格分镜与视频提示词"
+  short_description: "快速并行生成每镜头四宫格分镜与视频提示词"
+  default_prompt: "Use $batch-storyboard-video-prompts to quickly generate one review package per shot with a labeled storyboard and matching video prompt."
+policy:
+  allow_implicit_invocation: true
