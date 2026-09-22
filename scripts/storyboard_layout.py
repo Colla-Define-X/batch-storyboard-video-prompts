@@ -65,14 +65,21 @@ def compose(panel_paths: list[Path], labels: list[str], output: Path, width: int
 
 def load_manifest(path: Path) -> tuple[list[Path], list[str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    by_position = {item["position"]: item for item in data.get("panels", [])}
-    if set(by_position) != set(POSITIONS):
-        raise ValueError(f"Manifest must contain positions: {', '.join(POSITIONS)}")
+    panels = data.get("panels", [])
+    if not isinstance(panels, list) or len(panels) != 4:
+        raise ValueError("Manifest must contain exactly four panel records")
+    positions = [item.get("position") for item in panels]
+    if len(set(positions)) != 4 or set(positions) != set(POSITIONS):
+        raise ValueError(f"Manifest must contain each position exactly once: {', '.join(POSITIONS)}")
+    by_position = {item["position"]: item for item in panels}
     paths, labels = [], []
     for position, default_time in zip(POSITIONS, DEFAULT_TIMES):
         item = by_position[position]
         paths.append((path.parent / item["image"]).resolve())
-        time = item.get("time", default_time)
+        if "start_seconds" in item and "end_seconds" in item:
+            time = f"{item['start_seconds']}–{item['end_seconds']}秒"
+        else:
+            time = item.get("time", default_time)
         labels.append(f"{time} {item['label']}")
     return paths, labels
 

@@ -16,6 +16,7 @@ REQUIRED_PATHS = (
     "VERSION",
     "agents/openai.yaml",
     "references/prompt-templates.md",
+    "references/hybrid-coordination.md",
     "references/schema.md",
     "references/strict-mode.md",
     "scripts/reference_preview.py",

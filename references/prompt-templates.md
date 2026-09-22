@@ -7,8 +7,9 @@
 时长规则：每镜头不少于4秒；大部分为5–10秒；四格时间按已确认时长派生
 视觉与声音：<shared style, continuity, audio>
 审核方式：先确认分镜提示词，再确认分镜图，最后确认视频提示词
-执行方式：全局确认后，每个镜头单独创建一个可见任务
+执行方式：一个总控对话；创建并发任务前询问“全部开始”或“先做1–2个看效果”；公共规则只从 shared-brief.md 读取
 交付：带描述分镜图 + 视频提示词；不自动生成付费视频
+模式判定：普通“生成/批量生成/生成分镜图”仍为分阶段审核；只有用户明确要求直接生成、跳过确认或合并审核时才使用快速模式
 
 镜头映射：<shot -> images and narrow roles>
 ```
@@ -37,7 +38,7 @@
 
 ## Optional fast per-shot review package
 
-Use this compact order:
+Use this compact order only after recording the user's explicit fast-mode request in `shot.json`:
 
 ```text
 镜头：<shot-id / title>
@@ -60,7 +61,7 @@ Use this compact order:
 | 2.5–4秒 | <4–8 characters> | <full state> |
 | 4–5秒 | <4–8 characters> | <final state> |
 
-QA：<pass / known minor issues / severe retry result>
+QA：<pass / known minor issues / severe failure awaiting user decision>
 视频提示词：<complete prompt>
 ```
 
