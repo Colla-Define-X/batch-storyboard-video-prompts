@@ -20,12 +20,47 @@ def make_image(path: Path, color: str = "red") -> None:
     Image.new("RGB", (16, 16), color).save(path)
 
 
+def prepare(project: Path, sid="shot-01") -> None:
+    manifest = workflow.read_json(project / "project.json")
+    if not manifest.get("assets"):
+        source = project / "input.png"
+        make_image(source)
+        workflow.add_source(project, source, "image-01")
+    (project / "shared-brief.md").write_text("Approved wooden desk and daylight", encoding="utf-8")
+    data = workflow.read_json(workflow.shot_json_path(project, sid))
+    boundaries = manifest["defaults"]["time_boundaries_seconds"]
+    data.update(references=[{"id": "image-01", "roles": ["product_identity"]}], sequence_type="cuts")
+    data["panels"] = [dict(position=position, start_seconds=boundaries[i], end_seconds=boundaries[i+1],
+                          time=f"{boundaries[i]}–{boundaries[i+1]}秒", label="外观展示", description="产品在木桌上")
+                      for i, position in enumerate(workflow.POSITIONS)]
+    workflow.write_json(workflow.shot_json_path(project, sid), data)
+    (project / "shots" / sid / "storyboard-prompt.md").write_text("四宫格9:16，产品以image-01为准；四阶段展示外观、结构、使用细节和定格。奶油色标签。", encoding="utf-8")
+
+
+def record_image(project: Path, sid="shot-01") -> None:
+    workflow.preflight(project, sid)
+    path = workflow.shot_json_path(project, sid)
+    data = workflow.read_json(path)
+    Image.new("RGB", (90, 160), "blue").save(path.parent / f"storyboard-review-v{data['storyboard_version']:02d}.png")
+    data["qa"] = {"result": "pass", "notes": []}
+    workflow.write_json(path, data)
+
+
 class WorkflowTests(unittest.TestCase):
+    def test_default_duration_uses_four_one_second_panels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            workflow.init_project(project, "demo", 1)
+            manifest = json.loads((project / "project.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["defaults"]["duration_seconds"], 4)
+            self.assertEqual(manifest["defaults"]["duration_policy"]["typical_range_seconds"], [4, 10])
+            self.assertEqual(manifest["defaults"]["time_boundaries_seconds"], [0, 1, 2, 3, 4])
+
     def test_staged_project_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             project = base / "project"
-            workflow.init_project(project, "demo", 2, 5)
+            workflow.init_project(project, "demo", 2, 5, "storyboard_and_video_prompt")
             workflow.set_concurrency(project, "pilot", 1)
             workflow.register_task(project, "shot-01", "thread-123", "host-456")
 
@@ -34,9 +69,12 @@ class WorkflowTests(unittest.TestCase):
             workflow.add_source(project, source, "image-01")
 
             workflow.set_status(project, "shot-01", "storyboard_prompt_pending", coordinator=True)
+            prepare(project)
             workflow.approve(project, "shot-01", "storyboard_prompt", None)
+            record_image(project)
             workflow.set_status(project, "shot-01", "storyboard_review_pending", coordinator=True)
             workflow.approve(project, "shot-01", "storyboard", "画面通过")
+            (project / "shots/shot-01/video-prompt.md").write_text("Approved video guidance", encoding="utf-8")
             workflow.set_status(project, "shot-01", "video_prompt_review_pending", coordinator=True)
             workflow.approve(project, "shot-01", "video_prompt", None)
             workflow.validate(project)
@@ -71,7 +109,9 @@ class WorkflowTests(unittest.TestCase):
                 workflow.set_review_mode(project, "shot-01", "fast", None)
 
             workflow.set_review_mode(project, "shot-01", "fast", "用户要求直接生成")
+            prepare(project)
             workflow.set_status(project, "shot-01", "running", coordinator=True)
+            record_image(project)
             workflow.set_status(project, "shot-01", "review_pending", coordinator=True)
             workflow.approve(project, "shot-01", "review_package", "完整审核包通过")
             workflow.validate(project)
@@ -94,7 +134,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue((project / "shared-brief.md").is_file())
             self.assertIsNone(manifest["workflow"]["parallel_launch_mode"])
             self.assertIsNone(manifest["workflow"]["max_parallel_shot_tasks"])
-            self.assertEqual(manifest["workflow"]["video_prompt_owner"], "coordinator")
+            self.assertEqual(manifest["workflow"]["video_prompt_owner"], "current_conversation")
 
             with self.assertRaisesRegex(ValueError, "Concurrency choice is not recorded"):
                 workflow.register_task(project, "shot-01", "thread-1", None)
@@ -135,6 +175,7 @@ class WorkflowTests(unittest.TestCase):
             project = Path(directory) / "project"
             workflow.init_project(project, "demo", 1)
             workflow.set_status(project, "shot-01", "storyboard_prompt_pending", coordinator=True)
+            prepare(project)
             workflow.approve(project, "shot-01", "storyboard_prompt", None)
             workflow.set_status(project, "shot-01", "generation_failed", coordinator=True)
             with self.assertRaisesRegex(ValueError, "Invalid staged transition"):
@@ -182,7 +223,7 @@ class WorkflowTests(unittest.TestCase):
     def test_migrates_schema_v3_with_backup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            workflow.init_project(project, "demo", 1)
+            workflow.init_project(project, "demo", 1, 5)
             project_path = project / "project.json"
             shot_path = project / "shots/shot-01/shot.json"
             manifest = json.loads(project_path.read_text(encoding="utf-8"))

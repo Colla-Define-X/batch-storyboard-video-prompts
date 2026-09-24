@@ -1,6 +1,6 @@
 interface:
-  display_name: "批量四宫格分镜与视频提示词"
+  display_name: "分镜图+视频提示词"
   short_description: "设计视频分镜图并逐镜头生成匹配的视频提示词"
-  default_prompt: "Use $batch-storyboard-video-prompts with one coordinator; before creating parallel shot tasks, ask whether to start all shots or pilot one or two first. Keep staged review unless I explicitly ask to skip or consolidate it."
+  default_prompt: "Use $batch-storyboard-video-prompts. If I omit the quantity, make one storyboard image and keep prompt confirmation and review in this conversation. For two or more images, ask about parallel execution before creating shot tasks. Save storyboard-prompt.md before generating. Keep staged review unless I explicitly ask to skip or consolidate it."
 policy:
   allow_implicit_invocation: true

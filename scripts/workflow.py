@@ -11,6 +11,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from project_io import atomic_bytes, inside, transaction, consistent_read
 
 
 POSITIONS = ("top_left", "top_right", "bottom_left", "bottom_right")
@@ -30,16 +31,16 @@ STAGED_TRANSITIONS = {
     "todo": {"storyboard_prompt_pending"},
     "storyboard_prompt_pending": set(),
     "storyboard_generating": {"storyboard_review_pending", "generation_failed"},
-    "storyboard_review_pending": {"storyboard_generating"},
+    "storyboard_review_pending": set(),
     "video_prompt_pending": {"video_prompt_review_pending", "generation_failed"},
-    "video_prompt_review_pending": {"video_prompt_pending"},
+    "video_prompt_review_pending": set(),
     "generation_failed": set(),
     "complete": set(),
 }
 FAST_TRANSITIONS = {
     "todo": {"running"},
     "running": {"review_pending", "failed"},
-    "review_pending": {"running"},
+    "review_pending": set(),
     "failed": set(),
     "complete": set(),
 }
@@ -56,17 +57,18 @@ APPROVAL_TRANSITIONS = {
 
 
 def write_json(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f".{path.name}.tmp")
-    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temp.replace(path)
+    atomic_bytes(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
 def read_json(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if path.name == "shot.json" and data.get("shot_id") != path.parent.name:
+        raise ValueError("shot_id does not match its directory")
+    return data
 
 
 def find_shot(project: dict, shot_id: str) -> dict:
+    validate_asset_id(shot_id)
     matches = [shot for shot in project["shots"] if shot["id"] == shot_id]
     if not matches:
         raise KeyError(f"Unknown shot: {shot_id}")
@@ -74,11 +76,15 @@ def find_shot(project: dict, shot_id: str) -> dict:
 
 
 def shot_json_path(root: Path, shot_id: str) -> Path:
-    return root / "shots" / shot_id / "shot.json"
+    validate_asset_id(shot_id)
+    directory = inside(root, Path("shots") / shot_id)
+    if directory.parent != (root / "shots").resolve() or directory.name != shot_id:
+        raise ValueError("Shot path escapes shots directory")
+    return inside(root, directory / "shot.json")
 
 
 def legacy_state_path(root: Path, shot_id: str) -> Path:
-    return root / "shots" / shot_id / "state.json"
+    return inside(root, shot_json_path(root, shot_id).parent / "state.json")
 
 
 def normalize_number(value: float) -> int | float:
@@ -95,6 +101,8 @@ def derive_time_boundaries(duration: float) -> list[int | float]:
         raise ValueError("Shot duration must be a finite number of at least 4 seconds") from exc
     if not math.isfinite(numeric_duration) or numeric_duration < 4:
         raise ValueError("Shot duration must be at least 4 seconds")
+    if numeric_duration == 4:
+        return [0, 1, 2, 3, 4]
     return [normalize_number(numeric_duration * ratio) for ratio in (0, 0.2, 0.5, 0.8, 1)]
 
 
@@ -108,17 +116,19 @@ def write_shared_brief(root: Path, name: str) -> None:
         return
     path.write_text(
         f"# {name} — 共享视觉规范\n\n"
-        "总控对话维护本文件；镜头任务只读取，不复制整段公共背景。\n\n"
-        "## 视觉连续性\n\n- 待总控确认并填写。\n\n"
-        "## 产品与包装不变量\n\n- 待总控确认并填写。\n\n"
-        "## 灯光、场景与构图\n\n- 待总控确认并填写。\n\n"
+        "当前对话维护本文件；多任务时由总控维护，镜头任务只读取。\n\n"
+        "## 视觉连续性\n\n- 待确认并填写。\n\n"
+        "## 产品与包装不变量\n\n- 待确认并填写。\n\n"
+        "## 灯光、场景与构图\n\n- 待确认并填写。\n\n"
         "## 声音与交付\n\n- 无对白、无旁白、仅极轻环境声。\n",
         encoding="utf-8",
     )
 
 
-def init_project(root: Path, name: str, shots: int, duration: float = 5) -> None:
-    if shots < 1:
+def init_project(root: Path, name: str, shots: int = 1, duration: float = 4, delivery: str = "storyboard_only") -> None:
+    if delivery not in {"storyboard_only", "storyboard_and_video_prompt"}:
+        raise ValueError("Invalid delivery scope")
+    if isinstance(shots, bool) or not isinstance(shots, int) or shots < 1:
         raise ValueError("--shots must be positive")
     boundaries = derive_time_boundaries(duration)
     if root.exists() and (not root.is_dir() or any(root.iterdir())):
@@ -148,24 +158,25 @@ def init_project(root: Path, name: str, shots: int, duration: float = 5) -> None
     write_json(root / "project.json", {
         "schema_version": 4,
         "name": name,
+        "delivery_scope": delivery,
         "defaults": {
             "ratio": "9:16", "layout": "2x2", "duration_seconds": normalize_number(duration),
-            "duration_policy": {"minimum_seconds": 4, "typical_range_seconds": [5, 10]},
+            "duration_policy": {"minimum_seconds": 4, "typical_range_seconds": [4, 10]},
             "reading_order": list(POSITIONS),
             "time_boundaries_seconds": boundaries,
             "time_ranges": format_time_ranges(boundaries),
             "video_resolution": "1080p", "audio": "无对白、无旁白、仅极轻环境声",
         },
         "workflow": {
-            "default_review_mode": "staged", "cross_shot_parallel": True,
+            "default_review_mode": "staged", "cross_shot_parallel": False,
             "approval": "storyboard_prompt_then_storyboard_then_video_prompt",
-            "execution_model": "coordinator_with_shot_slots",
+            "execution_model": "current_conversation",
             "parallel_launch_mode": None,
             "max_parallel_shot_tasks": None,
             "shared_brief_path": "shared-brief.md",
             "retry_policy": "explicit_user_request_only",
-            "video_prompt_owner": "coordinator",
-            "one_visible_task_per_shot": True,
+            "video_prompt_owner": "current_conversation",
+            "one_visible_task_per_shot": False,
         },
         "shots": rows,
     })
@@ -199,7 +210,7 @@ def add_source(root: Path, source: Path, asset_id: str) -> None:
     if any(asset.get("id") == asset_id for asset in assets):
         raise ValueError(f"Duplicate asset ID: {asset_id}")
 
-    sources_dir = (root / "sources").resolve()
+    sources_dir = inside(root, "sources")
     target = (sources_dir / f"{asset_id}{suffix}").resolve()
     if not target.is_relative_to(sources_dir):
         raise ValueError(f"Asset path escapes sources directory: {asset_id}")
@@ -229,6 +240,212 @@ def review_mode_for(shot_data: dict) -> str:
     return mode
 
 
+
+def delivery_scope(project: dict) -> str:
+    # Older projects explicitly used the combined pipeline.
+    value = project.get("delivery_scope", "storyboard_and_video_prompt")
+    if value not in {"storyboard_only", "storyboard_and_video_prompt"}:
+        raise ValueError("Invalid delivery scope")
+    return value
+
+
+def fingerprint(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def file_hash(path: Path, text: bool = False) -> str:
+    if not path.is_file() or not path.stat().st_size:
+        raise ValueError(f"Missing or empty artifact: {path}")
+    if text and not path.read_text(encoding="utf-8").strip():
+        raise ValueError(f"Empty text artifact: {path}")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def input_binding(root: Path, project: dict, data: dict) -> dict:
+    folder = shot_json_path(root, data["shot_id"]).parent
+    validate_boundaries(project["defaults"])
+    validate_assets(root, project)
+    refs = data.get("references", [])
+    assets = {a["id"]: a for a in project.get("assets", [])}
+    if not refs or any(r.get("id") not in assets or not r.get("roles") for r in refs):
+        raise ValueError("Every shot requires valid reference IDs and roles")
+    if len({r["id"] for r in refs}) != len(refs):
+        raise ValueError("Duplicate shot references")
+    panels = data.get("panels", [])
+    if len(panels) != 4:
+        raise ValueError("Exactly four panel records are required before generation")
+    validate_panels(panels, project["defaults"]["time_boundaries_seconds"])
+    if any(not x.get("description", "").strip() or not x.get("label", "").strip() for x in panels):
+        raise ValueError("Panels need visible descriptions and labels")
+    if data.get("sequence_type") not in {"continuous", "cuts"}:
+        raise ValueError("Set sequence_type to continuous or cuts")
+    brief = inside(root, project["workflow"]["shared_brief_path"])
+    return {
+        "prompt": file_hash(inside(root, folder / "storyboard-prompt.md"), text=True),
+        "brief": file_hash(brief, text=True),
+        "settings": fingerprint({"defaults": project["defaults"], "scope": delivery_scope(project)}),
+        "shot": fingerprint({key: data.get(key) for key in ("references", "camera", "must_keep", "forbidden", "sequence_type")}),
+        "panels": fingerprint([{k: v for k, v in panel.items() if k != "image"} for panel in panels]),
+        "sources": {r["id"]: assets[r["id"]]["sha256"] for r in refs},
+    }
+
+
+def require_approval(data: dict, stage: str, binding: dict) -> None:
+    approvals = [a for a in data.get("approvals", []) if a.get("stage") == stage and not a.get("invalidated_at")]
+    if not approvals or approvals[-1].get("binding") != binding:
+        raise ValueError(f"Missing or stale {stage} approval; use revise and obtain approval")
+
+
+def check_generation(root: Path, project: dict, data: dict) -> dict:
+    binding = input_binding(root, project, data)
+    if review_mode_for(data) == "staged":
+        require_approval(data, "storyboard_prompt", binding)
+    elif not data.get("review_mode_reason") or data.get("review_mode_source") != "explicit_user_request":
+        raise ValueError("Fast mode requires explicit authorization")
+    return binding
+
+
+def review_binding(root: Path, project: dict, data: dict) -> dict:
+    binding = check_generation(root, project, data)
+    if not data.get("generation_claimed"):
+        raise ValueError("Run preflight immediately before image generation")
+    if data.get("generation_binding") != binding:
+        raise ValueError("Generation inputs changed or preflight was not recorded")
+    version = data.get("storyboard_version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("Set a positive storyboard_version")
+    folder = shot_json_path(root, data["shot_id"]).parent
+    image = inside(root, folder / f"storyboard-review-v{version:02d}.png")
+    verify_image(image)
+    from PIL import Image
+    with Image.open(image) as im:
+        if im.width * 16 != im.height * 9:
+            raise ValueError("Storyboard must have a 9:16 canvas")
+    if data.get("qa", {}).get("result") not in {"pass", "pass_with_notes"}:
+        raise ValueError("Storyboard needs recorded visual QA before review")
+    return {"inputs": binding, "version": version, "image": file_hash(image)}
+
+
+def frozen_binding(root: Path, project: dict, data: dict) -> dict:
+    binding = review_binding(root, project, data)
+    require_approval(data, "storyboard", binding)
+    folder = shot_json_path(root, data["shot_id"]).parent
+    if file_hash(inside(root, folder / "storyboard-final.png")) != binding["image"]:
+        raise ValueError("Frozen storyboard differs from approved version")
+    if read_json(inside(root, folder / "storyboard-final.json")) != binding:
+        raise ValueError("Frozen storyboard manifest differs from approval")
+    return binding
+
+
+def video_binding(root: Path, project: dict, data: dict, fast=False) -> dict:
+    binding = review_binding(root, project, data) if fast else frozen_binding(root, project, data)
+    folder = shot_json_path(root, data["shot_id"]).parent
+    return {"storyboard": binding, "video": file_hash(inside(root, folder / "video-prompt.md"), text=True)}
+
+
+def freeze(root: Path, data: dict, binding: dict) -> None:
+    folder = shot_json_path(root, data["shot_id"]).parent
+    source = inside(root, folder / f"storyboard-review-v{binding['version']:02d}.png")
+    atomic_bytes(inside(root, folder / "storyboard-final.png"), source.read_bytes())
+    write_json(inside(root, folder / "storyboard-final.json"), binding)
+
+
+def preflight(root: Path, shot_id: str) -> None:
+    project = read_json(root / "project.json")
+    find_shot(project, shot_id)
+    data = read_json(shot_json_path(root, shot_id))
+    if data.get("status") not in {"storyboard_generating", "running"}:
+        raise ValueError("Shot is not authorized to generate")
+    binding = check_generation(root, project, data)
+    if data.get("generation_binding") != binding:
+        raise ValueError("Inputs changed; revise before generating")
+    if data.get("generation_claimed"):
+        raise ValueError("Generation already claimed; record failure/review and use retry")
+    folder = shot_json_path(root, shot_id).parent
+    versions = [int(match[1]) for path in folder.glob("storyboard-*.png")
+                if (match := re.fullmatch(r"storyboard-(?:review-)?v(\d+)\.png", path.name))]
+    previous = data.get("storyboard_version")
+    if isinstance(previous, int) and not isinstance(previous, bool) and previous > 0:
+        versions.append(previous)
+    data["storyboard_version"] = max(versions, default=0) + 1
+    data["qa"] = {"result": "not_run", "notes": []}
+    data["generation_claimed"] = True
+    write_json(shot_json_path(root, shot_id), data)
+    print(f"OK: generation authorized; save storyboard-v{data['storyboard_version']:02d}.png and matching review version")
+
+
+def invalidate(data: dict, stages: set[str]) -> None:
+    for approval in data.get("approvals", []):
+        if approval.get("stage") in stages and not approval.get("invalidated_at"):
+            approval["invalidated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def revise(root: Path, shot_id: str, stage: str, reason: str) -> None:
+    if not reason or not reason.strip():
+        raise ValueError("Revision requires the user's explicit request")
+    if stage not in {"storyboard_prompt", "storyboard", "video_prompt"}:
+        raise ValueError("Invalid revision stage")
+    project = read_json(root / "project.json")
+    row = find_shot(project, shot_id)
+    path = shot_json_path(root, shot_id)
+    data = read_json(path)
+    if stage == "storyboard_prompt":
+        invalidate(data, {"storyboard_prompt", "storyboard", "video_prompt", "review_package"})
+        data["generation_binding"] = None
+        data["generation_claimed"] = False
+        data["status"] = "todo" if review_mode_for(data) == "fast" else "storyboard_prompt_pending"
+    elif stage == "storyboard":
+        check_generation(root, project, data)
+        invalidate(data, {"storyboard", "video_prompt", "review_package"})
+        data["status"] = "running" if review_mode_for(data) == "fast" else "storyboard_generating"
+        data["generation_binding"] = check_generation(root, project, data)
+        data["generation_claimed"] = False
+    else:
+        if delivery_scope(project) != "storyboard_and_video_prompt":
+            raise ValueError("Video-only revision requires combined delivery")
+        if review_mode_for(data) == "fast":
+            review_binding(root, project, data)
+            invalidate(data, {"review_package"})
+            data["status"] = "review_pending"
+        else:
+            frozen_binding(root, project, data)
+            invalidate(data, {"video_prompt"})
+            data["status"] = "video_prompt_pending"
+    data.setdefault("revisions", []).append({"stage": stage, "reason": reason, "at": datetime.now(timezone.utc).isoformat()})
+    row["status"] = data["status"]
+    write_json(path, data)
+    write_json(root / "project.json", project)
+
+
+def check_state(root: Path, project: dict, data: dict) -> None:
+    status = data["status"]
+    if status in {"storyboard_generating", "running", "generation_failed", "failed"}:
+        check_generation(root, project, data)
+    if status == "storyboard_review_pending":
+        review_binding(root, project, data)
+    if status == "review_pending":
+        if delivery_scope(project) == "storyboard_and_video_prompt":
+            video_binding(root, project, data, fast=True)
+        else:
+            review_binding(root, project, data)
+    if status in {"video_prompt_pending", "video_prompt_review_pending"}:
+        frozen_binding(root, project, data)
+        if status == "video_prompt_review_pending":
+            video_binding(root, project, data)
+    if status == "complete":
+        if review_mode_for(data) == "fast":
+            binding = video_binding(root, project, data, fast=True) if delivery_scope(project) == "storyboard_and_video_prompt" else review_binding(root, project, data)
+            require_approval(data, "review_package", binding)
+            frozen = binding["storyboard"] if "storyboard" in binding else binding
+            folder = shot_json_path(root, data["shot_id"]).parent
+            if file_hash(inside(root, folder / "storyboard-final.png")) != frozen["image"] or read_json(inside(root, folder / "storyboard-final.json")) != frozen:
+                raise ValueError("Frozen storyboard differs from approved package")
+        elif delivery_scope(project) == "storyboard_only":
+            frozen_binding(root, project, data)
+        else:
+            require_approval(data, "video_prompt", video_binding(root, project, data))
+
+
 def write_shot_status(root: Path, project: dict, shot_id: str, status: str) -> dict | None:
     schema = project.get("schema_version", 1)
     if schema >= 3:
@@ -240,7 +457,13 @@ def write_shot_status(root: Path, project: dict, shot_id: str, status: str) -> d
             current = shot_data.get("status")
             if status not in transitions.get(current, set()):
                 raise ValueError(f"Invalid {mode} transition: {current} -> {status}")
+        if status in {"generation_failed", "failed"}:
+            shot_data["failed_from"] = shot_data["status"]
+        if status == "running":
+            shot_data["generation_binding"] = check_generation(root, project, shot_data)
+            shot_data["generation_claimed"] = False
         shot_data["status"] = status
+        check_state(root, project, shot_data)
         write_json(path, shot_data)
         return shot_data
     write_json(legacy_state_path(root, shot_id), {"shot_id": shot_id, "status": status})
@@ -252,7 +475,7 @@ def set_status(root: Path, shot_id: str, status: str, coordinator: bool) -> None
     project = read_json(path)
     shot = find_shot(project, shot_id)
     shot_data = write_shot_status(root, project, shot_id, status)
-    if coordinator:
+    if coordinator or project.get("schema_version") == 4:
         shot["status"] = status
         if shot_data and project.get("schema_version") >= 4:
             shot["review_mode"] = shot_data["review_mode"]
@@ -267,8 +490,13 @@ def set_review_mode(root: Path, shot_id: str, mode: str, reason: str | None) -> 
     shot = find_shot(project, shot_id)
     shot_path = shot_json_path(root, shot_id)
     shot_data = read_json(shot_path)
-    if shot_data.get("status") != "todo":
-        raise ValueError("Review mode can only change while the shot status is todo")
+    if mode not in {"staged", "fast"}:
+        raise ValueError("Invalid review mode")
+    if shot_data.get("status") not in {"todo", "storyboard_prompt_pending"}:
+        raise ValueError("Mode can change only before generation; use revise for later stages")
+    if shot_data.get("status") == "storyboard_prompt_pending" and mode == "fast":
+        shot_data["status"] = "todo"
+        shot["status"] = "todo"
     reason = reason.strip() if reason else None
     if mode == "fast" and not reason:
         raise ValueError("Fast mode requires the user's explicit request in --reason")
@@ -295,7 +523,22 @@ def approve(root: Path, shot_id: str, stage: str, note: str | None) -> None:
     expected, target = transition
     if shot_data.get("status") != expected:
         raise ValueError(f"Cannot approve {stage}: expected {expected}, got {shot_data.get('status')}")
+    if stage == "storyboard_prompt":
+        binding = input_binding(root, project, shot_data)
+        shot_data["generation_binding"] = binding
+        shot_data["generation_claimed"] = False
+    elif stage == "storyboard":
+        binding = review_binding(root, project, shot_data)
+        freeze(root, shot_data, binding)
+        if delivery_scope(project) == "storyboard_only":
+            target = "complete"
+    elif stage == "video_prompt":
+        binding = video_binding(root, project, shot_data)
+    else:
+        binding = video_binding(root, project, shot_data, fast=True) if delivery_scope(project) == "storyboard_and_video_prompt" else review_binding(root, project, shot_data)
+        freeze(root, shot_data, binding.get("storyboard", binding))
     shot_data.setdefault("approvals", []).append({
+        "binding": binding,
         "stage": stage, "decision": "approved", "note": note,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     })
@@ -317,6 +560,8 @@ def sync_statuses(root: Path) -> None:
             data = read_json(state_path)
             if data.get("shot_id") != shot["id"] or data.get("status") not in STATUSES:
                 raise ValueError(f"Invalid shot state: {shot['id']}")
+            if schema >= 4:
+                check_state(root, project, data)
             shot["status"] = data["status"]
             if schema >= 4:
                 shot["review_mode"] = review_mode_for(data)
@@ -329,6 +574,8 @@ def set_concurrency(root: Path, mode: str, pilot_count: int | None = None) -> No
     if project.get("schema_version") != 4:
         raise ValueError("set-concurrency requires schema v4; run migrate first")
     shots = len(project.get("shots", []))
+    if shots <= 1:
+        raise ValueError("Single storyboard stays in the current conversation")
     active = sum(1 for shot in project.get("shots", []) if shot.get("task", {}).get("active") is True)
     if active:
         raise ValueError("Release active shot tasks before changing the concurrency choice")
@@ -341,6 +588,10 @@ def set_concurrency(root: Path, mode: str, pilot_count: int | None = None) -> No
     else:
         raise ValueError("Concurrency mode must be all or pilot")
     workflow = project.setdefault("workflow", {})
+    workflow["execution_model"] = "coordinator_with_shot_slots"
+    workflow["cross_shot_parallel"] = True
+    workflow["one_visible_task_per_shot"] = True
+    workflow["video_prompt_owner"] = "coordinator"
     workflow["parallel_launch_mode"] = mode
     workflow["max_parallel_shot_tasks"] = maximum
     write_json(path, project)
@@ -350,7 +601,15 @@ def register_task(root: Path, shot_id: str, thread_id: str, host_id: str | None)
     path = root / "project.json"
     project = read_json(path)
     shot = find_shot(project, shot_id)
+    if not thread_id or not thread_id.strip():
+        raise ValueError("Task ID must be nonempty")
+    if any(item["id"] != shot_id and item.get("task", {}).get("active") and item["task"].get("thread_id") == thread_id for item in project["shots"]):
+        raise ValueError("Task is already assigned to another active shot")
+    if len(project.get("shots", [])) <= 1:
+        raise ValueError("Single storyboard stays in the current conversation")
     if project.get("schema_version") >= 4:
+        latest = read_json(shot_json_path(root, shot_id))
+        shot["status"] = latest["status"]
         if shot.get("status") in {"video_prompt_pending", "video_prompt_review_pending", "complete"}:
             raise ValueError("Shot task cannot be activated during coordinator-owned video-prompt stages")
         workflow = project.get("workflow", {})
@@ -394,8 +653,12 @@ def retry_shot(root: Path, shot_id: str, target: str, reason: str | None) -> Non
     data = read_json(shot_path)
     mode = review_mode_for(data)
     allowed = {
-        "staged": {"generation_failed": {"storyboard_generating", "video_prompt_pending"}},
-        "fast": {"failed": {"running"}},
+        "staged": {
+            "generation_failed": {data.get("failed_from")},
+            "storyboard_review_pending": {"storyboard_generating"},
+            "video_prompt_review_pending": {"video_prompt_pending"},
+        },
+        "fast": {"failed": {"running"}, "review_pending": {"running"}},
     }
     current = data.get("status")
     if target not in allowed[mode].get(current, set()):
@@ -404,6 +667,13 @@ def retry_shot(root: Path, shot_id: str, target: str, reason: str | None) -> Non
         "from": current, "to": target, "reason": reason,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     })
+    if target in {"storyboard_generating", "running"}:
+        data["generation_binding"] = check_generation(root, project, data)
+        data["generation_claimed"] = False
+        invalidate(data, {"storyboard", "video_prompt", "review_package"})
+    else:
+        frozen_binding(root, project, data)
+        invalidate(data, {"video_prompt"})
     data["status"] = target
     shot["status"] = target
     write_json(shot_path, data)
@@ -442,19 +712,26 @@ def task_brief(root: Path, shot_id: str) -> str:
     shot_path = shot_json_path(root, shot_id)
     latest = read_json(shot_path) if shot_path.is_file() else shot
     status = latest.get("status")
-    if status in {"video_prompt_pending", "video_prompt_review_pending", "complete"}:
+    if status == "complete":
+        next_step = "请求范围已完成；仅按用户新的修改要求继续。"
+    elif len(project.get("shots", [])) == 1:
+        next_step = "单张分镜在当前对话执行，不创建子任务；遵循当前阶段的审核要求。"
+    elif status in {"video_prompt_pending", "video_prompt_review_pending"}:
         next_step = "此阶段由总控对话负责；不要在镜头任务中生成最终视频提示词。"
     elif status in {"storyboard_review_pending", "review_pending"}:
         next_step = "当前产物正在等待用户审核；停止并等待明确决定。"
     elif status in {"generation_failed", "failed"}:
         next_step = "生成已失败；不要自动重试，停止并等待用户决定。"
     else:
-        next_step = "只执行 shot.json 当前状态对应的下一步；完成后更新 shot.json 并停止。"
+        next_step = "只执行当前状态允许的下一步；使用workflow命令更新状态，不手改批准记录。"
     root = root.resolve()
     result = (
         f"处理 {shot_id}。\n\n读取：\n"
+        f"- {Path(__file__).resolve().parents[1] / 'SKILL.md'}\n"
+        f"- {Path(__file__).resolve().parents[1] / 'references' / 'execution.md'}\n"
         f"- {root / 'shared-brief.md'}\n"
         f"- {root / 'shots' / shot_id / 'shot.json'}\n"
+        f"- {root / 'shots' / shot_id / 'storyboard-prompt.md'}（缺失先按模板保存）\n"
         f"- {root / 'project.json'} 中的公共设置\n\n"
         f"{next_step}\n"
         "不要重新解释或复制全局规则。不要自动重试图片生成。"
@@ -467,13 +744,15 @@ def validate_boundaries(defaults: dict) -> list[int | float]:
     if defaults.get("ratio") != "9:16" or defaults.get("layout") != "2x2":
         raise ValueError("Schema v4 requires ratio 9:16 and layout 2x2")
     duration = defaults.get("duration_seconds")
-    expected = derive_time_boundaries(duration)
+    derive_time_boundaries(duration)
     boundaries = defaults.get("time_boundaries_seconds")
-    if boundaries != expected:
-        raise ValueError(f"Invalid time boundaries; expected {expected}")
-    if defaults.get("time_ranges") != format_time_ranges(expected):
+    if not isinstance(boundaries, list) or len(boundaries) != 5 or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) for x in boundaries):
+        raise ValueError("Invalid time boundaries")
+    if boundaries[0] != 0 or boundaries[-1] != duration or any(a >= b for a, b in zip(boundaries, boundaries[1:])):
+        raise ValueError("Time boundaries must increase from zero to the approved duration")
+    if defaults.get("time_ranges") != format_time_ranges(boundaries):
         raise ValueError("time_ranges do not match time_boundaries_seconds")
-    return expected
+    return boundaries
 
 
 def validate_panels(panels: list, boundaries: list[int | float]) -> None:
@@ -499,7 +778,7 @@ def validate_assets(root: Path, project: dict) -> None:
     ids = [asset.get("id") for asset in assets]
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate asset IDs")
-    sources_dir = (root / "sources").resolve()
+    sources_dir = inside(root, "sources")
     for asset in assets:
         validate_asset_id(asset["id"])
         source = (root / asset["stable_path"]).resolve()
@@ -529,8 +808,10 @@ def validate_workflow(root: Path, project: dict) -> None:
         raise ValueError("parallel_launch_mode must be null, all, or pilot")
     if workflow.get("retry_policy") != "explicit_user_request_only":
         raise ValueError("Schema v4 requires explicit-user retry policy")
-    if workflow.get("video_prompt_owner") != "coordinator":
-        raise ValueError("Schema v4 requires coordinator-owned video prompts")
+    if workflow.get("video_prompt_owner") not in {"coordinator", "current_conversation"}:
+        raise ValueError("Invalid video prompt owner")
+    if len(project.get("shots", [])) == 1 and launch_mode is not None:
+        raise ValueError("Single storyboard cannot use parallel shot tasks")
     brief_relative = workflow.get("shared_brief_path")
     if not isinstance(brief_relative, str):
         raise ValueError("Missing shared_brief_path")
@@ -549,7 +830,12 @@ def validate(root: Path) -> None:
     schema = project.get("schema_version")
     if schema not in (1, 2, 3, 4):
         raise ValueError("Unsupported schema_version")
+    delivery_scope(project)
     ids = [shot["id"] for shot in project.get("shots", [])]
+    if not ids:
+        raise ValueError("Project needs at least one shot")
+    for sid in ids:
+        shot_json_path(root, sid)
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate shot IDs")
     boundaries = validate_boundaries(project["defaults"]) if schema >= 4 else None
@@ -579,6 +865,9 @@ def validate(root: Path) -> None:
                 if not isinstance(shot.get("task", {}).get("active"), bool):
                     raise ValueError(f"Invalid task activity flag: {shot['id']}")
                 validate_panels(data.get("panels", []), boundaries)
+                if data["status"] != shot["status"]:
+                    raise ValueError("Shot status summary mismatch; run sync")
+                check_state(root, project, data)
         else:
             state_path = legacy_state_path(root, shot["id"])
             if state_path.exists():
@@ -602,20 +891,30 @@ def migrate(root: Path) -> None:
     shutil.copy2(project_path, backup_path)
     try:
         defaults = project["defaults"]
-        boundaries = derive_time_boundaries(defaults.get("duration_seconds", 5))
+        defaults.setdefault("duration_seconds", 4)
+        boundaries = defaults.get("time_boundaries_seconds") or derive_time_boundaries(defaults["duration_seconds"])
+        # Preserve valid legacy displayed times when numeric boundaries were absent.
+        if "time_boundaries_seconds" not in defaults and defaults.get("time_ranges"):
+            parsed = [re.fullmatch(r"([0-9.]+)[–-]([0-9.]+)秒", value) for value in defaults["time_ranges"]]
+            if len(parsed) == 4 and all(parsed):
+                pairs = [(float(m[1]), float(m[2])) for m in parsed]
+                if all(pairs[i][1] == pairs[i+1][0] for i in range(3)):
+                    boundaries = [normalize_number(pairs[0][0])] + [normalize_number(pair[1]) for pair in pairs]
         defaults["time_boundaries_seconds"] = boundaries
         defaults["time_ranges"] = format_time_ranges(boundaries)
+        validate_boundaries(defaults)
         project["schema_version"] = 4
+        project.setdefault("delivery_scope", "storyboard_and_video_prompt")
         project["workflow"] = {
-            "default_review_mode": "staged", "cross_shot_parallel": True,
+            "default_review_mode": "staged", "cross_shot_parallel": False,
             "approval": "storyboard_prompt_then_storyboard_then_video_prompt",
-            "execution_model": "coordinator_with_shot_slots",
+            "execution_model": "current_conversation",
             "parallel_launch_mode": None,
             "max_parallel_shot_tasks": None,
             "shared_brief_path": "shared-brief.md",
             "retry_policy": "explicit_user_request_only",
-            "video_prompt_owner": "coordinator",
-            "one_visible_task_per_shot": True,
+            "video_prompt_owner": "current_conversation",
+            "one_visible_task_per_shot": False,
         }
         write_shared_brief(root, project.get("name", "分镜项目"))
         shot_updates = []
@@ -626,6 +925,11 @@ def migrate(root: Path) -> None:
                 "shot_card_pending": "storyboard_prompt_pending",
                 "storyboard_pending": "storyboard_review_pending",
             }.get(data.get("status"), data.get("status"))
+            data["legacy_status"] = migrated_status
+            # Old approvals cannot be bound retroactively to today's files.
+            migrated_status = "todo" if migrated_status == "todo" else "storyboard_prompt_pending"
+            for approval in data.get("approvals", []):
+                approval["invalidated_at"] = datetime.now(timezone.utc).isoformat()
             data["status"] = migrated_status
             shot["status"] = migrated_status
             mode = "fast" if data.get("status") in {"running", "review_pending", "failed"} else "staged"
@@ -649,6 +953,10 @@ def migrate(root: Path) -> None:
             task["active"] = False
             shot_updates.append((shot_path, data))
         for shot_path, data in shot_updates:
+            shot_backup = shot_path.with_name("shot.json.bak")
+            if shot_backup.exists():
+                raise FileExistsError(f"Refusing to overwrite backup: {shot_backup}")
+            shutil.copy2(shot_path, shot_backup)
             write_json(shot_path, data)
         write_json(project_path, project)
     except Exception:
@@ -662,8 +970,9 @@ def main() -> None:
     init = sub.add_parser("init")
     init.add_argument("root", type=Path)
     init.add_argument("--name", required=True)
-    init.add_argument("--shots", type=int, required=True)
-    init.add_argument("--duration", type=float, default=5)
+    init.add_argument("--shots", type=int, default=1)
+    init.add_argument("--delivery", choices=("storyboard_only", "storyboard_and_video_prompt"), default="storyboard_only")
+    init.add_argument("--duration", type=float, default=4)
     source = sub.add_parser("add-source")
     source.add_argument("root", type=Path)
     source.add_argument("source", type=Path)
@@ -711,9 +1020,17 @@ def main() -> None:
     check.add_argument("root", type=Path)
     migration = sub.add_parser("migrate")
     migration.add_argument("root", type=Path)
+    pre = sub.add_parser("preflight")
+    pre.add_argument("root", type=Path)
+    pre.add_argument("shot_id")
+    revision = sub.add_parser("revise")
+    revision.add_argument("root", type=Path)
+    revision.add_argument("shot_id")
+    revision.add_argument("stage", choices=("storyboard_prompt", "storyboard", "video_prompt"))
+    revision.add_argument("--reason", required=True)
     args = parser.parse_args()
     if args.command == "init":
-        init_project(args.root, args.name, args.shots, args.duration)
+        init_project(args.root, args.name, args.shots, args.duration, args.delivery)
     elif args.command == "add-source":
         add_source(args.root, args.source, args.id)
     elif args.command == "status":
@@ -740,9 +1057,19 @@ def main() -> None:
         task_brief(args.root, args.shot_id)
     elif args.command == "validate":
         validate(args.root)
+    elif args.command == "preflight":
+        preflight(args.root, args.shot_id)
+    elif args.command == "revise":
+        revise(args.root, args.shot_id, args.stage, args.reason)
     elif args.command == "migrate":
         migrate(args.root)
 
+
+# Serialize each complete read/modify/write operation; recover interrupted mutations first.
+for _name in ("add_source", "set_status", "set_review_mode", "approve", "sync_statuses", "set_concurrency", "register_task", "release_task", "retry_shot", "revise", "preflight", "migrate"):
+    globals()[_name] = transaction(globals()[_name])
+for _name in ("validate", "dashboard", "task_brief"):
+    globals()[_name] = consistent_read(globals()[_name])
 
 if __name__ == "__main__":
     main()

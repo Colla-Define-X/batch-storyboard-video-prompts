@@ -1,5 +1,7 @@
 # Hybrid coordinator and shot-task workflow
 
+Use this reference only when the user requests two or more storyboard images and separate shot conversations are appropriate. If the user gives no quantity, default to one storyboard image. For a single image, keep prompt confirmation and all later review in the current conversation; skip coordinator/shot-task design and concurrency selection.
+
 Use one coordinator conversation plus a user-selected set of active shot conversations. Do not impose a two-task default.
 
 This follows [OpenAI's long-running work guidance](https://learn.chatgpt.com/docs/long-running-work): keep related work in one chat for shared context and use separate chats only when tasks can run independently.
@@ -29,7 +31,7 @@ Send only that output to the shot task. It points to:
 - the matching `shots/<shot-id>/shot.json` for local state;
 - `project.json` for common settings.
 
-The shot task must not restate the full global brief, edit another shot, update `project.json`, create final video prompts, or retry generation automatically. It performs only the next action allowed by its current status and then stops for review.
+The shot task owns content for its assigned shot and must not edit another shot or manually edit project.json. Workflow commands lock and update both manifests with recovery. The coordinator owns shared-brief.md, source/task registration and final video prompts. Do not retry automatically. A fast combined-delivery shot returns its reviewed image while still running; the coordinator adds the video prompt then enters review_pending.
 
 ## Choose concurrency before task creation
 
@@ -56,7 +58,7 @@ Registering a task activates a slot:
 python scripts/workflow.py register-task <project> shot-01 <thread-id> --host-id <host-id>
 ```
 
-A registration beyond the user-selected limit is rejected. A slot is released when the storyboard is approved and ownership returns to the coordinator, when the task is manually released, or when the shot completes:
+A registration beyond the user-selected limit is rejected. A slot is released when the storyboard is approved, when manually released, or when the requested scope completes. Image-only approval completes the shot; combined delivery returns for the video prompt:
 
 ```bash
 python scripts/workflow.py release-task <project> shot-01

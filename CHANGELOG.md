@@ -6,6 +6,16 @@
 
 ## [Unreleased]
 
+### Fixed — 2026-09-24 workflow audit
+
+- Enforce saved prompts, references, four-panel data, generation preflight and real review artifacts.
+- Bind approvals to content hashes; add revisions and phase-aware authorized retries.
+- Default to one 4-second storyboard-only delivery in the current conversation; allow explicit combined delivery.
+- Serialize project mutations with OS locks and recoverable multi-file rollback; back up all migrated manifests.
+- Preserve valid custom timings, constrain shot paths, refuse overwritten layout outputs and provide grid splitting.
+- Distinguish continuous action from edited views and reconcile staged/fast review rules.
+- Old unbound approvals now require renewed review; no existing project is automatically migrated.
+
 ## [1.1.0] - Unreleased
 
 ### Added

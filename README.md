@@ -7,9 +7,9 @@
 ## 能做什么
 
 - 在项目层统一确认画幅、布局、镜头时长、视觉连续性、声音与交付范围。
-- 为每个镜头建立独立审核流程：分镜提示词 → 分镜图 → 视频提示词。
+- 每镜头默认审核提示词与分镜图；请求视频提示词时追加对应审核阶段。
 - 支持多个镜头并行推进，且不会让一个镜头的审核阻塞其他镜头。
-- 使用一个总控对话；创建并发任务前询问是全部开始，还是先做 1–2 个确认效果。
+- 未指定数量时默认生成1张；单张在当前对话完成。多张需要创建并发任务时，询问全部开始还是先做1–2个确认效果。
 - 稳定保存参考图、SHA-256 哈希、镜头状态和分镜版本。
 - 将四张无标签画面确定性排版为 9:16、2×2 的带时间标签分镜图。
 - 提供显式请求才启用的快速模式，一次提交完整审核包。
@@ -76,7 +76,7 @@ $batch-storyboard-video-prompts
 用快速模式处理这些参考图，按镜头给我一次性审核包。
 ```
 
-默认模式适合客户交付和高保真产品内容。它会在全局配置确认后，为每个镜头创建独立可见任务，并在三个阶段分别等待明确批准。
+默认模式适合客户交付和高保真产品内容。单张分镜在当前对话确认与制作；多张在用户选择并发方式后创建授权的镜头任务，并在各阶段等待明确批准。
 
 “生成”“批量生成”“生成分镜图”和“设计分镜图”都只表示开始制作，仍然使用默认分阶段模式。只有用户明确提出“直接生成”“不用确认”“跳过审核”“一次出完”“合并审核”或“快速模式”时，才切换为快速模式并记录该要求。
 
@@ -89,19 +89,19 @@ $batch-storyboard-video-prompts
         ↓
 为每个镜头生成分镜提示词
         ↓
-每镜头独立审核：提示词 → 分镜图 → 视频提示词
+按交付范围审核：提示词 → 分镜图 → 按需审核视频提示词
         ↓
-批准后冻结最终分镜与提示词
+批准后冻结最终分镜；组合交付同时保存视频提示词
 ```
 
 ## 总控与可选择的并发方式
 
-采用混合模式，但不默认限制为两个任务：
+以下协调流程适用于两张及以上分镜。未指定数量或只要一张时，在当前对话完成，不询问并发方式：
 
 - 一个总控对话维护 `shared-brief.md`、公共设置、参考图、状态看板和最终视频提示词。
 - 创建并发任务前，先询问用户是“全部镜头同时开始”，还是“先做 1–2 个镜头确认效果”。
 - 用户没有选择前不创建镜头任务；选择全部开始后允许所有镜头并发，选择试做后只启动指定的 1 或 2 个。
-- 镜头任务只读取共享文件和自己的 `shot.json`，不重复粘贴完整项目背景。
+- 镜头任务只维护自己的镜头内容，读取共享文件；状态和批准通过带锁的工作流命令更新。
 - 分镜获批后释放镜头任务槽位，视频提示词由总控统一生成。
 - 图片生成失败时不自动重试；小问题也先交用户审核。
 
@@ -111,106 +111,25 @@ $batch-storyboard-video-prompts
 
 关键约束：
 
-- 单张 9:16 图片恰好包含四个连续画面。
-- 每个镜头不得短于 4 秒，普通产品镜头默认 5 秒，多数镜头保持在 5–10 秒。
-- 先生成无标签画面，再通过脚本添加时间与动作标签。
+- 单张 9:16 图片恰好包含四个有顺序的画面；根据动作选择连续过程或明确切镜。
+- 每个镜头不得短于 4 秒，普通产品镜头默认 4 秒，多数镜头保持在 4–10 秒。
+- 通常先生成无标签画面，再通过脚本添加时间与动作标签；用户明确要求直接生成标签时检查后不重复添加。
 - 保留所有 `storyboard-vNN.png`，不覆盖历史版本。
 - 未经用户单独授权，不提交可能收费的视频生成任务。
 
 ## 辅助脚本
 
-需要 Python 3.10 或更高版本。项目初始化和状态管理使用标准库；加入参考图、图像排版和参考图预览需要 Pillow。
-
-初始化一个四镜头项目：
+默认初始化一张、4秒、仅图片的项目：
 
 ```bash
-python scripts/workflow.py init ./demo-project --name "产品展示" --shots 4 --duration 5
+python scripts/workflow.py init ./demo-project --name "产品展示"
 ```
 
-加入并固化参考图：
+组合交付加 `--delivery storyboard_and_video_prompt`；多张加 `--shots N`。保存提示词与镜头数据并记录审核/快速模式授权后，必须执行 `preflight` 才能调用生图。
 
-```bash
-python scripts/workflow.py add-source ./demo-project ./product.jpg --id image-01
-```
+命令、版本命名、拆格、冻结、修订、重试与旧项目迁移见 [执行指南](references/execution.md)。不要使用旧版“只有状态、没有文件”的操作示例。
 
-校验项目：
-
-```bash
-python scripts/workflow.py validate ./demo-project
-```
-
-用户明确要求直接生成时，为对应镜头记录快速模式和原因：
-
-```bash
-python scripts/workflow.py set-mode ./demo-project shot-01 fast \
-  --reason "用户明确要求直接生成，不逐步确认"
-```
-
-分阶段模式分别记录三次批准：
-
-```bash
-python scripts/workflow.py status ./demo-project shot-01 storyboard_prompt_pending
-python scripts/workflow.py approve ./demo-project shot-01 storyboard_prompt
-python scripts/workflow.py status ./demo-project shot-01 storyboard_review_pending
-python scripts/workflow.py approve ./demo-project shot-01 storyboard
-python scripts/workflow.py status ./demo-project shot-01 video_prompt_review_pending
-python scripts/workflow.py approve ./demo-project shot-01 video_prompt
-```
-
-快速模式在完整审核包获批后记录最终批准：
-
-```bash
-python scripts/workflow.py status ./demo-project shot-01 running
-python scripts/workflow.py status ./demo-project shot-01 review_pending
-python scripts/workflow.py approve ./demo-project shot-01 review_package
-```
-
-显式升级旧版 schema v3 项目：
-
-```bash
-python scripts/workflow.py migrate ./demo-project
-```
-
-迁移会先创建 `project.json.bak`；校验命令不会自动修改旧项目。
-
-显示状态看板并生成轻量镜头启动指令：
-
-```bash
-python scripts/workflow.py dashboard ./demo-project
-python scripts/workflow.py task-brief ./demo-project shot-01
-```
-
-先记录用户选择，再注册和释放镜头任务：
-
-```bash
-python scripts/workflow.py set-concurrency ./demo-project all
-# 或：python scripts/workflow.py set-concurrency ./demo-project pilot --count 2
-python scripts/workflow.py register-task ./demo-project shot-01 THREAD_ID --host-id HOST_ID
-python scripts/workflow.py release-task ./demo-project shot-01
-```
-
-失败后只有在用户明确要求时才能重试：
-
-```bash
-python scripts/workflow.py retry ./demo-project shot-01 storyboard_generating \
-  --reason "用户明确要求重新生成分镜"
-```
-
-根据 `shot.json` 中的四张面板图生成带标签分镜：
-
-```bash
-python scripts/storyboard_layout.py \
-  ./demo-project/shots/shot-01/shot.json \
-  ./demo-project/shots/shot-01/storyboard-review-v01.png
-```
-
-显示全部命令：
-
-```bash
-python scripts/workflow.py --help
-python scripts/storyboard_layout.py --help
-python scripts/reference_preview.py --help
-```
+状态写入受跨进程锁与恢复日志保护。批准绑定实际产物哈希，内容变化会使旧批准失效。重做分配新版本，排版拒绝覆盖已有输出。
 
 ## 仓库结构
 

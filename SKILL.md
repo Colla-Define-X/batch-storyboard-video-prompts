@@ -5,75 +5,54 @@ description: Create or design video storyboard images from product references, g
 
 # Batch Storyboard Video Prompts
 
-Default to a customer-facing staged workflow. Requests such as “生成分镜图”, “设计分镜图”, “制作视频分镜”, or “批量生成分镜” select this skill but do not select fast mode. Confirm the project globally and require separate approval for the storyboard prompt, storyboard image, and video prompt.
+Create product storyboards using the user's photos and [prompt reference](references/prompt-templates.md). Before operating project files or generating an image, read [execution.md](references/execution.md) for the commands and artifact contract.
 
-Use the one-pass fast workflow only when the user explicitly asks for “直接生成”, “不用确认”, “跳过审核”, “一次出完”, “合并审核”, “快速模式”, or an equivalent unambiguous instruction. Record that request with `workflow.py set-mode ... fast --reason`. If the wording is ambiguous, remain staged.
+## Scope and review mode
 
-## Confirm once at project level
+- Quantity omitted means **one storyboard image**, regardless of the number of reference photos. One image contains four panels; four panels do not mean four separate deliverables.
+- One image stays in the current conversation. Do not ask about concurrency or create another task. For two or more, use separate tasks only after the user chooses that arrangement; then read [hybrid-coordination.md](references/hybrid-coordination.md). All images may also stay here.
+- If only images are requested, use `storyboard_only`. Include video prompts only when requested or already accepted, using `storyboard_and_video_prompt`. Scope determines completion.
+- Default to staged review: prompt → image → video prompt only for combined delivery. Ordinary “生成分镜图” does not waive prompt review.
+- Explicit “直接生成 / 不用确认 / 跳过审核 / 一次出完 / 合并审核 / 快速模式” permits fast mode with combined final review. Record `set-mode ... fast --reason`. Fast mode takes precedence over single-image staged steps. If the user only approves the current prompt, record that approval without changing remaining review gates.
 
-Present and confirm together:
+## Brief and references
 
-- compact global configuration: ratio, 2x2 layout, duration, time ranges, visual continuity, audio, review format, delivery scope;
-- complete shot-to-image mapping;
-- one or a small number of narrow roles per reference: product identity, structure/count, packaging/text, background/lighting, hand/action, or composition. Keep the role set minimal.
+Defaults: one image, 9:16 canvas, 2×2 equal panels, 4 seconds, 0–1 / 1–2 / 2–3 / 3–4 seconds, top left → top right → bottom left → bottom right, 1080p target, no dialogue or narration. Minimum duration is 4 seconds; typical range is 4–10 seconds. Preserve approved timing, including valid custom ranges.
 
-Defaults: 9:16, 2x2, 5 seconds, top-left → top-right → bottom-left → bottom-right, 1080p, no dialogue or narration. Every shot must be at least 4 seconds; most shots should be 5–10 seconds. Derive four readable time ranges from the approved duration instead of forcing fixed timestamps.
+Confirm scene, duration, audio, scope and reference roles. For a single staged image, combine settings, reference previews and the complete saved prompt in one review message when information is sufficient. Do not repeatedly confirm the same settings. Authorized fast mode uses the user's settings and reasonable defaults without an extra preliminary approval gate.
 
-After confirmation, initialize the empty project with `scripts/workflow.py init`, fill the generated `shared-brief.md` once, then add each source with `workflow.py add-source` so it is stabilized under `sources/` with a recorded hash. Read [references/schema.md](references/schema.md) only when creating or updating project files.
+Stabilize photos under `sources/` using `add-source`. Directly embed original references with absolute local Markdown paths, followed by image IDs and narrow roles. Product photos control identity, structure, color, material and accessories; format images control only layout, photography and labels. Never invent a missing format image. Contact sheets are optional when requested or direct embeds cannot be displayed.
 
-Conflict precedence: user text; product reference; scene/light reference; action/composition reference; defaults.
+Priority: explicit user text → product reference → scene/light reference → action/composition reference → defaults. Do not invent unseen structures or functions. Substitute another angle or material detail if opening or hand operation is unsuitable.
 
-## Default customer workflow
+## Mandatory saved prompt
 
-After global settings are approved, generate the complete set of shot-specific storyboard prompts. Before creating any parallel shot conversations, ask the user to choose between starting every shot now or piloting one or two shots to review the effect first. Do not infer either choice or create shot conversations before the answer. Record the choice with `workflow.py set-concurrency`, then create only the authorized tasks. Read [references/hybrid-coordination.md](references/hybrid-coordination.md) before creating shot tasks.
+Every generation requires `shots/<shot-id>/storyboard-prompt.md`, broadly following the user's template in [prompt-templates.md](references/prompt-templates.md). Read that reference for every prompt. Include actual reference roles, layout, photography, four timed states, product constraints, labels and output requirements.
 
-If the user prioritizes minimum usage over true background parallelism, keep every shot in the coordinator conversation. Shots may remain at different states, but disclose that one conversation does not provide independent background execution. If the host cannot create visible tasks, use this single-conversation workflow.
+If absent, silently write the file before generating. Restoring approved chat text should preserve it exactly; a new or materially changed prompt needs staged approval. Fast mode permits the draft to remain undisplayed. Saving a file or user silence does not constitute approval.
 
-Each shot task or in-conversation shot advances through these gates:
+Populate four panel records, camera plan, product constraints and `sequence_type` (`continuous` or `cuts`) in `shot.json`. Continuous actions must physically connect; different views may use explicit cuts. Do not force opening, hand use, macro details and full-product framing into an implausible single four-second camera move.
 
-1. Show the shot's reference-image preview, image IDs, and narrow roles; then present the complete storyboard-generation prompt and wait for approval or modification.
-2. Generate, QA, and label the 2x2 storyboard; present it and wait for approval or modification.
-3. Freeze the approved storyboard and return control to the coordinator. The coordinator drafts matching video prompts, preferably in one batch, and waits for approval or modification.
-4. Mark the shot complete only after the video prompt is approved.
+After prompt approval or fast-mode authorization, run `preflight <project> <shot-id>` immediately before every image-generation call. It checks saved inputs and reserves one new version. Use the saved prompt for that call. If it fails, do not call generation. Checks cover files, hashes, references and workflow state; the agent still checks prompt quality and visually inspects images.
 
-In staged mode, do not skip a gate, infer approval from silence, or generate the next-stage artifact before approval. Record approvals with `workflow.py approve`. A change to an earlier stage invalidates and refreshes every dependent later stage. Shots are independent and may progress in parallel without blocking one another. Generate the dashboard with `workflow.py dashboard` instead of repeating project context. Read [references/strict-mode.md](references/strict-mode.md) before starting shot tasks.
+The saved prompt describes the labeled deliverable. Normally retain its content and append an execution instruction: “Generate clean four-panel artwork without labels or timestamps; reserve label-safe space for later exact typesetting.” Save the actual tool input as `generation-prompt-vNN.md`. If the user explicitly requests generated labels, follow that and do not add duplicate labels afterward.
 
-Before presenting a shot prompt, embed each stabilized original reference from `sources/` directly with an absolute local Markdown image path, followed immediately by its image ID and narrow role. Do not generate or compose a derived preview by default: direct embeds are faster, preserve the original pixels, and avoid unnecessary processing. Never require the user to identify references from IDs or filenames alone. Use `scripts/reference_preview.py` only when the user explicitly requests a contact sheet or the host cannot display multiple direct image embeds.
+## Generate and review
 
-The coordinator owns `shared-brief.md`, `project.json`, source stabilization, the concurrency question, visible-task creation, the dashboard, and final video prompts. Each shot task reads the shared files, writes only inside `shots/<shot-id>/`, and owns its `shot.json`. Give it only the output of `workflow.py task-brief`; do not paste the complete global brief into its prompt. Register visible task IDs with `workflow.py register-task`, release a slot with `workflow.py release-task`, and sync summaries with `workflow.py sync`.
+1. Staged: save and show complete prompt with references, then record explicit `approve ... storyboard_prompt`. Fast: save prompt, record `set-mode ... fast --reason`, then enter `running`.
+2. Run preflight. Generate one image with the image-generation skill and save the allocated `storyboard-vNN.png`. Inspect exactly four panels, product identity/count, structures, hands and action plausibility.
+3. For clean art, split the verified grid with the layout helper, populate panel `image` paths and compose `storyboard-review-vNN.png`. Inspect labels and cropping. For directly generated labels, inspect them and save the reviewed image under that review filename. See execution.md.
+4. Set `qa.result` to `pass` or `pass_with_notes` only after visual inspection. Severe defects enter failure state and require the user's retry decision. Never retry automatically.
+5. Staged: enter `storyboard_review_pending`, present image and QA, wait. Approval freezes the image and hashes. Image-only delivery completes here. Combined delivery continues to `video_prompt_pending`; save `video-prompt.md`, enter `video_prompt_review_pending`, present and wait for approval.
+6. Fast: present image and QA, plus a pending video-prompt draft only for combined scope. Enter `review_pending`. `approve ... review_package` freezes and completes. Do not describe a pending image as approved.
 
-## Optional fast workflow
+Do not automatically submit paid video generation. Video prompts use the matching storyboard as `@Image1`, not an exact first frame, read its panels in order and ignore labels/grid/timestamps. Match the approved sequence type, timing, camera, constraints and actual uploaded image numbering.
 
-Use only when the user explicitly requests fast, direct generation, skipped confirmation, consolidated review, or one-pass review. Ordinary uses of “生成” or “批量生成” are not enough. Before generating, set the shot to fast mode and record the user's request. Each shot then runs end-to-end before asking for approval:
+## Changes, failures and writes
 
-1. Write a compact shot brief inside `shot.json`: reference roles, four timed states, camera motion, must-keep items, and forbidden changes.
-2. Generate one unlabeled 9:16 2x2 storyboard with the image generation skill.
-3. Run only the essential QA checks: exactly four panels; correct product count/identity; no severe hand or object deformation; action continuity; no watermark, subtitle, or obvious extra object.
-4. Never retry automatically. Report severe failures and minor composition or packaging-text drift, set the relevant failure or review status, and wait for the user. Retry only through `workflow.py retry ... --reason` after an explicit request.
-5. Add deterministic labels in the form `time + short Chinese action` with `scripts/storyboard_layout.py`.
-6. Return the actual storyboard and QA result to the coordinator.
-7. The coordinator drafts the matching video prompt and presents one review package: compact brief, labeled storyboard, four-row description table, short QA result, and video prompt.
+- Changing prompt, reference, timing, brief or shot plan makes the old binding stale. Use `revise ... storyboard_prompt --reason`, edit, then reapprove in staged mode. Fast mode still needs recorded authorization.
+- Explicitly requested new attempts from review/failure use `retry ... --reason`. Reopen approved images with `revise ... storyboard --reason`; staged video-only changes use `revise ... video_prompt --reason`. Preserve all old versions and approval history. Failure phase controls retry destination.
+- Never manually edit statuses/approvals. Workflow commands serialize updates to both manifests and recover interrupted transactions. One owner edits a shot's content while idle. Do not remove a lock/journal to bypass a busy command.
+- Schema-v3 projects need explicit `migrate`, which backs up changed manifests and resets unbound approvals to pending. Old v4 approvals lacking hashes need revision and renewed approval before further generation; never fabricate retrospective approval.
 
-Set `review_pending` and wait. The user may approve, request a targeted change, or request regeneration. On approval, preserve the accepted version as `storyboard-final.png`, keep the final video prompt, and mark `complete`. A storyboard change requires refreshing its video prompt.
-
-Do not infer approval from silence. Approval applies only to that shot.
-
-Read [references/prompt-templates.md](references/prompt-templates.md) when composing the review package or video prompt.
-
-## Core invariants
-
-- One 9:16 image contains exactly four coherent panels.
-- Keep product count, identity, geometry, materials, patterns, packaging layout, hands, lighting, and final state stable.
-- Treat packaging text as visual layout; do not promise exact unreadable small copy or add marketing text.
-- Generate without labels, then add labels deterministically.
-- Preserve numbered versions; never overwrite `storyboard-vNN.png`.
-- `@Image1` in the video prompt is the approved storyboard reference, not an exact first frame. Tell the video model to read the four panels in order and ignore grid lines, labels, timestamps, and instructional text.
-- Avoid flicker, morphing, duplicated parts, drifting patterns, extra fingers, subtitles, and watermarks.
-- Do not submit paid video generation unless the user separately asks.
-
-## Duration invariant
-
-- Reject or revise any proposed shot shorter than 4 seconds.
-- Default ordinary product shots to 5 seconds.
-- Keep most shots within 5–10 seconds; use 4 seconds only for a deliberately concise transition or detail beat.
-- Reflect the approved duration consistently in the storyboard prompt, panel labels, shot manifest, and video prompt.
+See [schema.md](references/schema.md) for fields and [strict-mode.md](references/strict-mode.md) for staged review. These commands cannot intercept an agent that directly calls a generation tool without using them; mandatory preflight remains an agent execution requirement.

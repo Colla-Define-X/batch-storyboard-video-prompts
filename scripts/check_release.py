@@ -22,6 +22,8 @@ REQUIRED_PATHS = (
     "scripts/reference_preview.py",
     "scripts/storyboard_layout.py",
     "scripts/workflow.py",
+    "scripts/project_io.py",
+    "references/execution.md",
 )
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 

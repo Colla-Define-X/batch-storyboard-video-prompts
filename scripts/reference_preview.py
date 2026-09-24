@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+from project_io import inside
+from workflow import shot_json_path, find_shot, validate_assets
 
 
 def font(size: int) -> ImageFont.FreeTypeFont:
@@ -34,6 +36,9 @@ def main() -> None:
     args = parser.parse_args()
 
     project = json.loads((args.project / "project.json").read_text(encoding="utf-8"))
+    find_shot(project, args.shot_id)
+    shot_json_path(args.project, args.shot_id)
+    validate_assets(args.project, project)
     assets = {item["id"]: item for item in project.get("assets", [])}
     refs = args.ref
     for image_id, _ in refs:
@@ -54,7 +59,7 @@ def main() -> None:
         x = gap + col * (card_w + gap)
         y = header_h + gap + row * (card_h + gap)
         draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=22, fill="#FFF9EE", outline="#B89B73", width=3)
-        asset_path = args.project / assets[image_id]["stable_path"]
+        asset_path = inside(args.project, assets[image_id]["stable_path"])
         with Image.open(asset_path) as source:
             preview = ImageOps.contain(source.convert("RGB"), (card_w - 40, card_h - 140), Image.Resampling.LANCZOS)
         px = x + (card_w - preview.width) // 2
@@ -65,7 +70,10 @@ def main() -> None:
 
     output = args.output or args.project / "shots" / args.shot_id / "reference-preview.png"
     output.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(output, quality=94)
+    if output.exists():
+        raise FileExistsError(f"Choose a new preview filename: {output}")
+    with output.open("xb") as stream:
+        canvas.save(stream, format="PNG")
     print(output.resolve())
 
 
