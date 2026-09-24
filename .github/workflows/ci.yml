@@ -15,10 +15,29 @@ jobs:
         python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Check patch formatting
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "$BASE_SHA...$GITHUB_SHA"
+          elif [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            git diff-tree --check --root -r "$GITHUB_SHA"
+          else
+            git diff --check "$BEFORE_SHA...$GITHUB_SHA"
+          fi
+      - name: Install CJK font
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Validate release metadata

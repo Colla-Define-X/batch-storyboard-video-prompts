@@ -6,17 +6,7 @@
 
 ## [Unreleased]
 
-### Fixed — 2026-09-24 workflow audit
-
-- Enforce saved prompts, references, four-panel data, generation preflight and real review artifacts.
-- Bind approvals to content hashes; add revisions and phase-aware authorized retries.
-- Default to one 4-second storyboard-only delivery in the current conversation; allow explicit combined delivery.
-- Serialize project mutations with OS locks and recoverable multi-file rollback; back up all migrated manifests.
-- Preserve valid custom timings, constrain shot paths, refuse overwritten layout outputs and provide grid splitting.
-- Distinguish continuous action from edited views and reconcile staged/fast review rules.
-- Old unbound approvals now require renewed review; no existing project is automatically migrated.
-
-## [1.1.0] - Unreleased
+## [1.1.0] - 2026-09-24
 
 ### Added
 
@@ -36,12 +26,19 @@
 - 允许每张参考图承担一个或少量明确职责。
 - 最终视频提示词改由总控统一生成，镜头任务不再重复公共规则。
 - 创建并发任务前必须询问“全部开始”或“先做 1–2 个看效果”，不再默认限制为两个任务。
+- 默认在当前对话生成一张4秒、仅分镜图的交付；需要时可明确选择组合交付。
+- 审批绑定内容哈希，支持分阶段修订和按失败阶段授权重试。
+- 区分连续动作与剪辑视角，并保留有效的自定义时间划分。
+- 项目写入使用操作系统锁和可恢复事务，迁移时备份所有相关清单。
 
 ### Fixed
 
 - 阻止资产 ID 路径越界、重复 ID、无效图片和不支持的文件类型。
 - 修正初始化与稳定化参考图的说明顺序。
 - 移除严重缺陷自动重试；失败和小问题统一等待用户决定。
+- 生成前强制校验已保存提示词、参考图、四格数据和真实审核产物。
+- 限制镜头路径、拒绝覆盖排版输出，并提供确定性的四宫格拆分。
+- 旧版无哈希审批必须重新确认，不自动迁移或伪造历史批准。
 
 ## [1.0.0] - 2026-09-21
 
@@ -54,6 +51,6 @@
 - 增加安装、使用、更新、测试和发布说明。
 - 建立语义化版本、发布校验、自动化测试与持续集成。
 
-[Unreleased]: https://github.com/Colla-Define-X/batch-storyboard-video-prompts/compare/v1.0.0...HEAD
-[1.1.0]: https://github.com/Colla-Define-X/batch-storyboard-video-prompts/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Colla-Define-X/batch-storyboard-video-prompts/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Colla-Define-X/batch-storyboard-video-prompts/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Colla-Define-X/batch-storyboard-video-prompts/releases/tag/v1.0.0
