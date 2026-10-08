@@ -8,15 +8,21 @@ import hashlib
 import json
 import math
 import re
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 from project_io import atomic_bytes, inside, transaction, consistent_read
 
 
 POSITIONS = ("top_left", "top_right", "bottom_left", "bottom_right")
+SHOT_SCALES = {"wide", "medium", "close", "macro"}
+SHOT_SCALE_LABELS = {"wide": "全景", "medium": "中景", "close": "近景", "macro": "微距"}
+DESIGN_FIELDS = ("shot_id", "context", "primary_selling_point", "purpose", "panel_beats",
+                 "shot_scales", "scale_exception_reason", "opening_motif", "action_motif",
+                 "ending_motif", "avoid_repeating", "intentional_bookend", "bookend_reason")
 ASSET_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+PREPARED_PROMPT_HANDOFF = "prepared_prompt_to_shot"
 
 FAST_STATUSES = ("todo", "running", "review_pending", "complete", "failed")
 STAGED_STATUSES = (
@@ -54,6 +60,11 @@ APPROVAL_TRANSITIONS = {
         "review_package": ("review_pending", "complete"),
     },
 }
+ARTIFACT_REVIEW_STAGES = {
+    "storyboard_review_pending": "storyboard",
+    "video_prompt_review_pending": "video_prompt",
+    "review_pending": "review_package",
+}
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -65,6 +76,118 @@ def read_json(path: Path) -> dict:
     if path.name == "shot.json" and data.get("shot_id") != path.parent.name:
         raise ValueError("shot_id does not match its directory")
     return data
+
+
+SHOT_CONTENT_FIELDS = {"title", "references", "review_style", "review_selling_point", "review_context",
+                       "review_purpose", "sequence_type", "camera", "must_keep", "forbidden", "panels", "qa"}
+
+
+def content_path(root: Path, relative: str) -> Path:
+    path = inside(root, relative)
+    parts = path.relative_to(root.resolve()).parts
+    if parts in {("shared-brief.md",), ("content-plan.json",), ("project.json",)}:
+        return path
+    if len(parts) == 3 and parts[0] == "shots" and parts[2] in {"shot.json", "storyboard-prompt.md", "video-prompt.md"}:
+        find_shot(read_json(root / "project.json"), parts[1])
+        return path
+    raise ValueError("Not an editable content file; states and approvals require workflow commands")
+
+
+def content_revision(root: Path, relative: str) -> str:
+    path = content_path(root, relative)
+    revision = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "missing"
+    print(revision)
+    return revision
+
+
+def save_content(root: Path, relative: str, draft: Path, expected_hash: str) -> str:
+    """Import a draft under the project lock, with compare-and-swap protection."""
+    path = content_path(root, relative)
+    current = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else "missing"
+    if not expected_hash or current != expected_hash:
+        raise ValueError("Content version conflict; reread and merge the latest content before saving")
+    raw = draft.read_text(encoding="utf-8")
+    if not raw.strip():
+        raise ValueError("Content draft must not be empty")
+    parts = path.relative_to(root.resolve()).parts
+    if len(parts) == 3:
+        shot_path = shot_json_path(root, parts[1])
+        data = read_json(shot_path)
+        status = data["status"]
+        if path.name == "shot.json":
+            changes = json.loads(raw)
+            if not isinstance(changes, dict) or set(changes) - SHOT_CONTENT_FIELDS:
+                raise ValueError("Shot content patch may contain content fields only, not states or approvals")
+            pending_qa = status in {"storyboard_review_pending", "review_pending"}
+            if pending_qa:
+                if set(changes) != {"qa"}:
+                    raise ValueError("Only QA may change during image/package review; use revise for other content")
+                qa = changes["qa"]
+                if (not isinstance(qa, dict) or not isinstance(qa.get("result"), str)
+                        or qa["result"] not in {"pass", "pass_with_notes", "failed"}
+                        or not isinstance(qa.get("notes", []), list)
+                        or any(not isinstance(note, str) for note in qa.get("notes", []))):
+                    raise ValueError("Pending QA needs pass, pass_with_notes or failed, with text notes")
+                if qa != data.get("qa"):
+                    data.pop("artifact_review", None)
+            elif status not in {"todo", "storyboard_prompt_pending"}:
+                if status not in {"storyboard_generating", "running"} or set(changes) - {"qa", "panels"}:
+                    raise ValueError("Use revise before changing approved shot content")
+                if "panels" in changes:
+                    semantics = lambda panels: [{k: v for k, v in panel.items() if k != "image"} for panel in panels]
+                    if semantics(changes["panels"]) != semantics(data["panels"]):
+                        raise ValueError("During generation only panel image paths and QA may change")
+            data.update(changes)
+            if pending_qa and data["qa"]["result"] == "failed":
+                # Record a discovered defect without granting another generation.
+                # Both manifests are written in this save-content transaction.
+                data["failed_from"] = "storyboard_generating" if status == "storyboard_review_pending" else "running"
+                data["status"] = "generation_failed" if status == "storyboard_review_pending" else "failed"
+                data.pop("artifact_review", None)
+                invalidate(data, {"storyboard", "video_prompt", "review_package"})
+                project = read_json(root / "project.json")
+                find_shot(project, data["shot_id"])["status"] = data["status"]
+                write_json(path, data)
+                write_json(root / "project.json", project)
+            else:
+                write_json(path, data)
+        else:
+            allowed = {"todo", "storyboard_prompt_pending"} if path.name == "storyboard-prompt.md" else (
+                {"running", "review_pending"} if review_mode_for(data) == "fast" else
+                {"video_prompt_pending", "video_prompt_review_pending"})
+            if status not in allowed:
+                raise ValueError("Use revise before changing this prompt")
+            atomic_bytes(path, raw.encode("utf-8"))
+            if path.name == "video-prompt.md" and hashlib.sha256(raw.encode("utf-8")).hexdigest() != current:
+                data.pop("artifact_review", None)
+                write_json(shot_path, data)
+    elif path.name == "project.json":
+        changes = json.loads(raw)
+        if not isinstance(changes, dict) or set(changes) - {"name", "defaults", "delivery_scope"}:
+            raise ValueError("Project content patch may contain name, defaults and delivery_scope only")
+        project = read_json(path)
+        if "delivery_scope" in changes and changes["delivery_scope"] != delivery_scope(project):
+            for row in project["shots"]:
+                shot = read_json(shot_json_path(root, row["id"]))
+                if (shot["status"] not in {"todo", "storyboard_prompt_pending"}
+                        or shot.get("prompt_review") or shot.get("approvals")
+                        or shot.get("generation_binding") or shot.get("storyboard_version")):
+                    raise ValueError("Delivery scope is locked after prompt review or generation begins; "
+                                     "mid-project scope switching is not supported")
+        project.update(changes)
+        validate_boundaries(project["defaults"])
+        delivery_scope(project)
+        write_json(path, project)
+    elif path.name == "content-plan.json":
+        plan = json.loads(raw)
+        if not isinstance(plan, dict):
+            raise ValueError("Content plan must be a JSON object")
+        write_json(path, plan)
+    else:
+        atomic_bytes(path, raw.encode("utf-8"))
+    result = hashlib.sha256(path.read_bytes()).hexdigest()
+    print(result)
+    return result
 
 
 def find_shot(project: dict, shot_id: str) -> dict:
@@ -114,18 +237,17 @@ def write_shared_brief(root: Path, name: str) -> None:
     path = root / "shared-brief.md"
     if path.exists():
         return
-    path.write_text(
+    atomic_bytes(path, (
         f"# {name} — 共享视觉规范\n\n"
         "当前对话维护本文件；多任务时由总控维护，镜头任务只读取。\n\n"
         "## 视觉连续性\n\n- 待确认并填写。\n\n"
         "## 产品与包装不变量\n\n- 待确认并填写。\n\n"
         "## 灯光、场景与构图\n\n- 待确认并填写。\n\n"
-        "## 声音与交付\n\n- 无对白、无旁白、仅极轻环境声。\n",
-        encoding="utf-8",
-    )
+        "## 声音与交付\n\n- 无对白、无旁白、仅极轻环境声。\n"
+    ).encode("utf-8"))
 
 
-def init_project(root: Path, name: str, shots: int = 1, duration: float = 4, delivery: str = "storyboard_only") -> None:
+def init_project(root: Path, name: str, shots: int = 1, duration: float = 4, delivery: str = "storyboard_and_video_prompt") -> None:
     if delivery not in {"storyboard_only", "storyboard_and_video_prompt"}:
         raise ValueError("Invalid delivery scope")
     if isinstance(shots, bool) or not isinstance(shots, int) or shots < 1:
@@ -136,6 +258,10 @@ def init_project(root: Path, name: str, shots: int = 1, duration: float = 4, del
     root.mkdir(parents=True, exist_ok=True)
     (root / "sources").mkdir()
     write_shared_brief(root, name)
+    write_json(root / "content-plan.json", {
+        "content_type": None, "relationship": None, "approval_source": None,
+        "confirmation": None, "shots": [],
+    })
     rows = []
     for index in range(1, shots + 1):
         shot_id = f"shot-{index:02d}"
@@ -171,8 +297,10 @@ def init_project(root: Path, name: str, shots: int = 1, duration: float = 4, del
             "default_review_mode": "staged", "cross_shot_parallel": False,
             "approval": "storyboard_prompt_then_storyboard_then_video_prompt",
             "execution_model": "current_conversation",
+            "handoff_model": PREPARED_PROMPT_HANDOFF,
             "parallel_launch_mode": None,
             "max_parallel_shot_tasks": None,
+            "content_plan_required": True,
             "shared_brief_path": "shared-brief.md",
             "retry_policy": "explicit_user_request_only",
             "video_prompt_owner": "current_conversation",
@@ -217,20 +345,14 @@ def add_source(root: Path, source: Path, asset_id: str) -> None:
     if target.exists():
         raise FileExistsError(f"Stable source already exists: {target}")
 
-    temp = target.with_name(f".{target.name}.tmp")
-    shutil.copy2(source, temp)
-    try:
-        digest = hashlib.sha256(temp.read_bytes()).hexdigest()
-        temp.replace(target)
-        assets.append({
-            "id": asset_id, "source_name": source.name,
-            "stable_path": str(target.relative_to(root.resolve())), "sha256": digest,
-        })
-        write_json(path, project)
-    except Exception:
-        temp.unlink(missing_ok=True)
-        target.unlink(missing_ok=True)
-        raise
+    content = source.read_bytes()
+    atomic_bytes(target, content)
+    verify_image(target)
+    assets.append({
+        "id": asset_id, "source_name": source.name,
+        "stable_path": str(target.relative_to(root.resolve())), "sha256": hashlib.sha256(content).hexdigest(),
+    })
+    write_json(path, project)
 
 
 def review_mode_for(shot_data: dict) -> str:
@@ -249,6 +371,203 @@ def delivery_scope(project: dict) -> str:
     return value
 
 
+def content_plan(root: Path, project: dict, shot_id: str | None = None,
+                 require_approved: bool = True) -> dict | None:
+    """Validate the batch at launch, or only the executing shot during local work."""
+    if not project.get("workflow", {}).get("content_plan_required", False):
+        return None  # Existing projects keep their established approval path.
+    plan = read_json(inside(root, "content-plan.json"))
+    if plan.get("content_type") not in {"story", "showcase", "mixed"}:
+        raise ValueError("Content plan needs story, showcase, or mixed content_type")
+    shot_ids = [shot["id"] for shot in project["shots"]]
+    relationships = {"single"} if len(shot_ids) == 1 else {"continuous", "independent"}
+    if plan.get("relationship") not in relationships:
+        raise ValueError("Content plan needs a valid shot relationship")
+    if plan.get("approval_source") not in {"user", "explicit_fast_request"}:
+        raise ValueError("Content plan needs a confirmed approval_source")
+    entries = plan.get("shots")
+    if (not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries)
+            or [item.get("shot_id") for item in entries] != shot_ids):
+        raise ValueError("Content plan needs one ordered entry for every shot")
+    arcs = set()
+    if shot_id is not None:
+        find_shot(project, shot_id)
+    selected = [entry for entry in entries if shot_id is None or entry["shot_id"] == shot_id]
+    for entry in selected:
+        source = entry.get("approval_source", plan["approval_source"])
+        if source not in {"user", "explicit_fast_request"}:
+            raise ValueError(f"Content plan {entry['shot_id']} needs a valid approval_source")
+        if source == "explicit_fast_request":
+            shot = read_json(shot_json_path(root, entry["shot_id"]))
+            if shot.get("review_mode") != "fast" or shot.get("review_mode_source") != "explicit_user_request":
+                raise ValueError("Explicit skip requires fast review mode")
+        for key in ("context", "primary_selling_point", "purpose", "opening_motif",
+                    "action_motif", "ending_motif"):
+            if not isinstance(entry.get(key), str) or not entry[key].strip():
+                raise ValueError(f"Content plan {entry['shot_id']} needs {key}")
+        beats = entry.get("panel_beats")
+        if not isinstance(beats, list) or len(beats) != 4 or any(
+            not isinstance(beat, str) or not beat.strip() for beat in beats
+        ):
+            raise ValueError(f"Content plan {entry['shot_id']} needs four panel beats")
+        scales = entry.get("shot_scales")
+        if not isinstance(scales, list) or len(scales) != 4 or any(
+            not isinstance(scale, str) or scale not in SHOT_SCALES for scale in scales
+        ):
+            raise ValueError(f"Content plan {entry['shot_id']} needs four valid shot scales")
+        for key in ("scale_exception_reason", "bookend_reason"):
+            if key in entry and (not isinstance(entry[key], str) or not entry[key].strip()):
+                raise ValueError(f"Content plan {entry['shot_id']} needs a nonempty text {key}")
+        if "intentional_bookend" in entry and not isinstance(entry["intentional_bookend"], bool):
+            raise ValueError("intentional_bookend must be a boolean")
+        if len(set(scales)) < 3 and not entry.get("scale_exception_reason"):
+            raise ValueError(f"Content plan {entry['shot_id']} needs three scales or an exception reason")
+        if entry["opening_motif"].strip().casefold() == entry["ending_motif"].strip().casefold() and not entry.get("intentional_bookend"):
+            raise ValueError(f"Content plan {entry['shot_id']} repeats its opening at the end")
+        if entry.get("intentional_bookend") and not entry.get("bookend_reason"):
+            raise ValueError(f"Content plan {entry['shot_id']} needs a visible-change bookend reason")
+        if not isinstance(entry.get("avoid_repeating"), list) or any(
+            not isinstance(item, str) for item in entry["avoid_repeating"]
+        ):
+            raise ValueError(f"Content plan {entry['shot_id']} needs an avoid_repeating list")
+        arc = tuple(entry[key].strip().casefold() for key in ("opening_motif", "action_motif", "ending_motif"))
+        if arc in arcs:
+            raise ValueError("Content plan repeats a complete action arc across shots")
+        arcs.add(arc)
+    if require_approved:
+        for entry in selected:
+            require_design_approval(root, plan, entry)
+    return plan
+
+
+def design_snapshot(plan: dict, entry: dict) -> dict:
+    return {"content_type": plan["content_type"], "relationship": plan["relationship"],
+            "approval_source": entry.get("approval_source", plan["approval_source"]),
+            "shot": {key: entry.get(key) for key in DESIGN_FIELDS}}
+
+
+def require_design_approval(root: Path, plan: dict, entry: dict) -> None:
+    data = read_json(shot_json_path(root, entry["shot_id"]))
+    records = data.get("design_approvals", [])
+    snapshot = design_snapshot(plan, entry)
+    if (not records or records[-1].get("invalidated_at") or records[-1].get("snapshot") != snapshot
+            or records[-1].get("binding") != fingerprint(snapshot)):
+        raise ValueError(f"Missing or stale creative approval for {entry['shot_id']}; prepare-design-review and approve-design")
+
+
+def prepare_design_review(root: Path, shot_id: str) -> str:
+    project = read_json(root / "project.json")
+    plan = content_plan(root, project, shot_id, require_approved=False)
+    if plan is None:
+        raise ValueError("This legacy project does not use content planning")
+    path = shot_json_path(root, shot_id)
+    data = read_json(path)
+    if data["status"] not in {"todo", "storyboard_prompt_pending"}:
+        raise ValueError("Use revise storyboard_prompt before changing the creative design")
+    entry = next(item for item in plan["shots"] if item["shot_id"] == shot_id)
+    snapshot = design_snapshot(plan, entry)
+    check_design_arc(root, project, entry)
+    binding = fingerprint(snapshot)
+    review_id = uuid4().hex
+    data["design_review"] = {"id": review_id, "binding": binding, "snapshot": snapshot}
+    write_json(path, data)
+    print(f"{shot_id}｜{entry['context']}｜{entry['primary_selling_point']}\n" +
+          "\n".join(f"{i + 1}. {beat}" for i, beat in enumerate(entry["panel_beats"])) +
+          f"\n设计审核标识：{review_id}")
+    return review_id
+
+
+def check_design_arc(root: Path, project: dict, entry: dict) -> None:
+    # A new design must not silently duplicate another approved assignment, even
+    # when that other shot currently has an unfinished draft in content-plan.json.
+    arc_keys = ("opening_motif", "action_motif", "ending_motif")
+    arc = tuple(entry[key].strip().casefold() for key in arc_keys)
+    for row in project["shots"]:
+        if row["id"] == entry["shot_id"]:
+            continue
+        records = read_json(shot_json_path(root, row["id"])).get("design_approvals", [])
+        if records and not records[-1].get("invalidated_at"):
+            other = records[-1]["snapshot"]["shot"]
+            if arc == tuple(other[key].strip().casefold() for key in arc_keys):
+                raise ValueError("Content plan repeats a complete action arc across shots")
+
+
+def approve_design(root: Path, shot_id: str, review_id: str, confirmation: str) -> None:
+    project = read_json(root / "project.json")
+    plan = content_plan(root, project, shot_id, require_approved=False)
+    if plan is None:
+        raise ValueError("This legacy project does not use content planning")
+    path = shot_json_path(root, shot_id)
+    data = read_json(path)
+    if data["status"] not in {"todo", "storyboard_prompt_pending"}:
+        raise ValueError("Use revise storyboard_prompt before approving a new creative design")
+    if not isinstance(confirmation, str) or not confirmation.strip():
+        raise ValueError("Creative approval requires the user's actual confirmation or explicit fast request")
+    entry = next(item for item in plan["shots"] if item["shot_id"] == shot_id)
+    snapshot = design_snapshot(plan, entry)
+    review = data.get("design_review") or {}
+    if not review_id or review.get("id") != review_id or review.get("binding") != fingerprint(snapshot):
+        raise ValueError("Missing or stale creative review; prepare and show the current design first")
+    check_design_arc(root, project, entry)
+    data.setdefault("design_approvals", []).append({
+        "review_id": review_id, "binding": fingerprint(snapshot), "snapshot": snapshot,
+        "confirmation": confirmation.strip(), "recorded_at": datetime.now(timezone.utc).isoformat(),
+    })
+    entry["confirmation"] = confirmation.strip()  # Readable summary, not authorization.
+    write_json(path, data)
+    write_json(root / "content-plan.json", plan)
+
+
+def check_plan_alignment(plan: dict, data: dict) -> None:
+    entry = next(item for item in plan["shots"] if item["shot_id"] == data["shot_id"])
+    for local, approved in (("review_context", "context"), ("review_selling_point", "primary_selling_point"),
+                            ("review_purpose", "purpose")):
+        if data.get(local) != entry[approved]:
+            raise ValueError(f"Prompt plan differs from approved design: {local}")
+    for i, panel in enumerate(data["panels"]):
+        if (panel.get("position") != POSITIONS[i]
+                or panel.get("plan_panel_id") != f"{data['shot_id']}:panel-{i + 1}"
+                or panel.get("description") != entry["panel_beats"][i]
+                or panel.get("shot_scale") != entry["shot_scales"][i]):
+            raise ValueError(f"Prompt panel {i + 1} differs from approved design")
+
+
+def check_prompt_plan(root: Path, shot_id: str, note: str) -> None:
+    """Record the responsible conversation's semantic check, not a user checkpoint."""
+    project = read_json(root / "project.json")
+    find_shot(project, shot_id)
+    path = shot_json_path(root, shot_id)
+    data = read_json(path)
+    if data["status"] not in {"todo", "storyboard_prompt_pending"}:
+        raise ValueError("Check the prompt plan before generation; use revise for changes")
+    if not isinstance(note, str) or not note.strip():
+        raise ValueError("Record the responsible conversation's actual design and cross-shot check in --note")
+    binding = input_binding(root, project, data)
+    check_prompt_text(path.parent / "storyboard-prompt.md", data, "content_plan" in binding)
+    data["plan_check"] = {"binding": binding, "note": note.strip(),
+                          "recorded_at": datetime.now(timezone.utc).isoformat()}
+    write_json(path, data)
+
+
+def require_plan_check(data: dict, binding: dict) -> None:
+    if "content_plan" in binding and (data.get("plan_check") or {}).get("binding") != binding:
+        raise ValueError("Missing or stale plan check; run check-prompt-plan after reviewing the current prompt")
+
+
+def uses_prepared_handoff(project: dict) -> bool:
+    return project.get("workflow", {}).get("handoff_model") == PREPARED_PROMPT_HANDOFF
+
+
+def require_prepared_prompt(root: Path, project: dict, data: dict) -> None:
+    """Check an initial handoff without approving the prompt on the user's behalf."""
+    if data.get("status") != "storyboard_prompt_pending":
+        raise ValueError(f"Prepare {data['shot_id']} in storyboard_prompt_pending before initial handoff")
+    binding = input_binding(root, project, data)
+    check_prompt_text(shot_json_path(root, data["shot_id"]).parent / "storyboard-prompt.md",
+                      data, "content_plan" in binding)
+    require_plan_check(data, binding)
+
+
 def fingerprint(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
@@ -263,6 +582,7 @@ def file_hash(path: Path, text: bool = False) -> str:
 
 def input_binding(root: Path, project: dict, data: dict) -> dict:
     folder = shot_json_path(root, data["shot_id"]).parent
+    plan = content_plan(root, project, data["shot_id"])
     validate_boundaries(project["defaults"])
     validate_assets(root, project)
     refs = data.get("references", [])
@@ -280,7 +600,7 @@ def input_binding(root: Path, project: dict, data: dict) -> dict:
     if data.get("sequence_type") not in {"continuous", "cuts"}:
         raise ValueError("Set sequence_type to continuous or cuts")
     brief = inside(root, project["workflow"]["shared_brief_path"])
-    return {
+    binding = {
         "prompt": file_hash(inside(root, folder / "storyboard-prompt.md"), text=True),
         "brief": file_hash(brief, text=True),
         "settings": fingerprint({"defaults": project["defaults"], "scope": delivery_scope(project)}),
@@ -288,16 +608,85 @@ def input_binding(root: Path, project: dict, data: dict) -> dict:
         "panels": fingerprint([{k: v for k, v in panel.items() if k != "image"} for panel in panels]),
         "sources": {r["id"]: assets[r["id"]]["sha256"] for r in refs},
     }
+    if plan is not None:
+        check_plan_alignment(plan, data)
+        entry = next(item for item in plan["shots"] if item["shot_id"] == data["shot_id"])
+        binding["content_plan"] = fingerprint(design_snapshot(plan, entry))
+        binding["presentation"] = fingerprint({key: data.get(key) for key in
+                                               ("review_style", "review_context", "review_purpose", "review_selling_point")})
+    return binding
 
 
 def require_approval(data: dict, stage: str, binding: dict) -> None:
     approvals = [a for a in data.get("approvals", []) if a.get("stage") == stage and not a.get("invalidated_at")]
     if not approvals or approvals[-1].get("binding") != binding:
         raise ValueError(f"Missing or stale {stage} approval; use revise and obtain approval")
+    if stage == "storyboard_prompt" and approvals[-1].get("prompt_review_id"):
+        review = data.get("prompt_review") or {}
+        if review.get("id") != approvals[-1]["prompt_review_id"] or review.get("binding") != binding:
+            raise ValueError("Prompt review changed after approval; revise and obtain approval")
+        if review.get("summary_hash") != fingerprint(prompt_review_summary(data)):
+            raise ValueError("Prompt review summary changed after approval; revise and obtain approval")
+
+
+def prompt_review_summary(data: dict) -> dict:
+    return {
+        "shot_id": data["shot_id"],
+        "title": data.get("title", ""),
+        "visual_style": data.get("review_style", ""),
+        "selling_point": data.get("review_selling_point", ""),
+        "panels": [{key: panel[key] for key in ("time", "label", "description")}
+                   for panel in data.get("panels", [])],
+    }
+
+
+def check_prompt_text(prompt_path: Path, data: dict, planned: bool = False) -> None:
+    summary = prompt_review_summary(data)
+    if not summary["visual_style"].strip() or not summary["selling_point"].strip():
+        raise ValueError("Set review_style and review_selling_point in shot.json")
+    prompt = prompt_path.read_text(encoding="utf-8")
+    required = [summary["visual_style"], summary["selling_point"]]
+    for panel in summary["panels"]:
+        required.extend((panel["time"], panel["label"], panel["description"]))
+    if planned:
+        required.extend((data["review_context"], data["review_purpose"]))
+        required.extend(SHOT_SCALE_LABELS[panel["shot_scale"]] for panel in data["panels"])
+    missing = [value for value in required if value not in prompt]
+    if missing:
+        raise ValueError(f"Full prompt differs from shot review summary; missing: {missing[0]}")
+
+
+def prepare_prompt_review(root: Path, shot_id: str) -> str:
+    project = read_json(root / "project.json")
+    row = find_shot(project, shot_id)
+    path = shot_json_path(root, shot_id)
+    data = read_json(path)
+    if review_mode_for(data) != "staged" or data.get("status") != "storyboard_prompt_pending":
+        raise ValueError("Prompt review requires a staged shot awaiting prompt confirmation")
+    if uses_prepared_handoff(project) and len(project["shots"]) > 1 and not row.get("task", {}).get("thread_id"):
+        raise ValueError("Register the actual shot task before its initial prompt review")
+    binding = input_binding(root, project, data)
+    summary = prompt_review_summary(data)
+    prompt_path = path.parent / "storyboard-prompt.md"
+    check_prompt_text(prompt_path, data, "content_plan" in binding)
+    require_plan_check(data, binding)
+    summary_hash = fingerprint(summary)
+    review_id = uuid4().hex
+    data["prompt_review"] = {"id": review_id, "binding": binding, "summary_hash": summary_hash,
+                             "prepared_at": datetime.now(timezone.utc).isoformat()}
+    write_json(path, data)
+    lines = [f"{summary['title']}（{shot_id}）", f"视觉风格：{summary['visual_style']}",
+             f"核心卖点：{summary['selling_point']}"]
+    lines.extend(f"{panel['time']}｜{panel['label']}：{panel['description']}" for panel in summary["panels"])
+    lines.extend((f"完整提示词：{prompt_path.resolve()}", f"审核记录标识：{review_id}"))
+    result = "\n".join(lines)
+    print(result)
+    return review_id
 
 
 def check_generation(root: Path, project: dict, data: dict) -> dict:
     binding = input_binding(root, project, data)
+    require_plan_check(data, binding)
     if review_mode_for(data) == "staged":
         require_approval(data, "storyboard_prompt", binding)
     elif not data.get("review_mode_reason") or data.get("review_mode_source") != "explicit_user_request":
@@ -305,12 +694,10 @@ def check_generation(root: Path, project: dict, data: dict) -> dict:
     return binding
 
 
-def review_binding(root: Path, project: dict, data: dict) -> dict:
-    binding = check_generation(root, project, data)
+def review_image_artifact(root: Path, data: dict) -> dict:
+    """Check this attempt's completed image and QA, not current input approval."""
     if not data.get("generation_claimed"):
         raise ValueError("Run preflight immediately before image generation")
-    if data.get("generation_binding") != binding:
-        raise ValueError("Generation inputs changed or preflight was not recorded")
     version = data.get("storyboard_version")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise ValueError("Set a positive storyboard_version")
@@ -323,7 +710,14 @@ def review_binding(root: Path, project: dict, data: dict) -> dict:
             raise ValueError("Storyboard must have a 9:16 canvas")
     if data.get("qa", {}).get("result") not in {"pass", "pass_with_notes"}:
         raise ValueError("Storyboard needs recorded visual QA before review")
-    return {"inputs": binding, "version": version, "image": file_hash(image)}
+    return {"version": version, "image": file_hash(image)}
+
+
+def review_binding(root: Path, project: dict, data: dict) -> dict:
+    binding = check_generation(root, project, data)
+    if data.get("generation_binding") != binding:
+        raise ValueError("Generation inputs changed or preflight was not recorded")
+    return {"inputs": binding, **review_image_artifact(root, data)}
 
 
 def frozen_binding(root: Path, project: dict, data: dict) -> dict:
@@ -343,6 +737,52 @@ def video_binding(root: Path, project: dict, data: dict, fast=False) -> dict:
     return {"storyboard": binding, "video": file_hash(inside(root, folder / "video-prompt.md"), text=True)}
 
 
+def artifact_binding(root: Path, project: dict, data: dict, stage: str) -> dict:
+    if stage == "storyboard":
+        return review_binding(root, project, data)
+    if stage == "video_prompt":
+        return video_binding(root, project, data)
+    if stage == "review_package":
+        return (video_binding(root, project, data, fast=True)
+                if delivery_scope(project) == "storyboard_and_video_prompt"
+                else review_binding(root, project, data))
+    raise ValueError("Invalid artifact review stage")
+
+
+def record_artifact_review(root: Path, project: dict, data: dict) -> str:
+    stage = ARTIFACT_REVIEW_STAGES.get(data["status"])
+    if stage not in APPROVAL_TRANSITIONS[review_mode_for(data)]:
+        raise ValueError("Artifact review requires a pending image, video prompt or package")
+    data["artifact_review"] = {
+        "id": uuid4().hex, "stage": stage,
+        "binding": artifact_binding(root, project, data, stage),
+        "qa_hash": fingerprint(data.get("qa")),
+        "prepared_at": datetime.now(timezone.utc).isoformat(),
+    }
+    print(f"产物审核标识：{data['artifact_review']['id']}；展示当前产物与 QA 后等待确认。")
+    return data["artifact_review"]["id"]
+
+
+def prepare_artifact_review(root: Path, shot_id: str) -> str:
+    project = read_json(root / "project.json")
+    find_shot(project, shot_id)
+    path = shot_json_path(root, shot_id)
+    data = read_json(path)
+    review_id = record_artifact_review(root, project, data)
+    write_json(path, data)
+    return review_id
+
+
+def require_artifact_review(data: dict, stage: str, binding: dict, review_id: str | None,
+                            confirmation: str | None) -> None:
+    if not review_id or not confirmation or not confirmation.strip():
+        raise ValueError("Artifact approval requires current --review-id and explicit --confirmation")
+    review = data.get("artifact_review") or {}
+    if (review.get("id") != review_id or review.get("stage") != stage
+            or review.get("binding") != binding or review.get("qa_hash") != fingerprint(data.get("qa"))):
+        raise ValueError("Missing or stale artifact review; prepare-artifact-review and show the current version")
+
+
 def freeze(root: Path, data: dict, binding: dict) -> None:
     folder = shot_json_path(root, data["shot_id"]).parent
     source = inside(root, folder / f"storyboard-review-v{binding['version']:02d}.png")
@@ -350,12 +790,41 @@ def freeze(root: Path, data: dict, binding: dict) -> None:
     write_json(inside(root, folder / "storyboard-final.json"), binding)
 
 
-def preflight(root: Path, shot_id: str) -> None:
+def check_launch_permission(project: dict, data: dict, thread_id: str | None = None,
+                            host_id: str | None = None) -> None:
+    # Starting new work is distinct from validating an already approved image.
+    if len(project["shots"]) == 1 or review_mode_for(data) == "fast":
+        return
+    workflow = project["workflow"]
+    mode = workflow.get("parallel_launch_mode")
+    maximum = workflow.get("max_parallel_shot_tasks")
+    if mode not in {"all", "pilot"} or type(maximum) is not int or maximum < 1:
+        raise ValueError("Record the user's concurrency choice before generation")
+    if (mode == "pilot" and maximum not in {1, 2}) or (mode == "all" and maximum != len(project["shots"])):
+        raise ValueError("Invalid authorized concurrency limit")
+    if mode == "pilot":
+        cohort = workflow.get("pilot_shot_ids")
+        if not isinstance(cohort, list) or len(cohort) > maximum or data["shot_id"] not in cohort:
+            raise ValueError("Shot is outside the authorized pilot scope; ask the user how to continue")
+    task = find_shot(project, data["shot_id"]).get("task", {})
+    if task.get("active") is not True or not task.get("thread_id"):
+        raise ValueError("Register an active shot task before staged multi-shot generation")
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        raise ValueError("Multi-shot staged preflight requires the calling task's --thread-id")
+    if task.get("thread_id") != thread_id or task.get("host_id") != host_id:
+        raise ValueError("Preflight task identity does not match the active shot task")
+    if sum(row.get("task", {}).get("active") is True for row in project["shots"]) > maximum:
+        raise ValueError("Active shot tasks exceed the authorized concurrency")
+
+
+def preflight(root: Path, shot_id: str, thread_id: str | None = None,
+              host_id: str | None = None) -> None:
     project = read_json(root / "project.json")
     find_shot(project, shot_id)
     data = read_json(shot_json_path(root, shot_id))
     if data.get("status") not in {"storyboard_generating", "running"}:
         raise ValueError("Shot is not authorized to generate")
+    check_launch_permission(project, data, thread_id, host_id)
     binding = check_generation(root, project, data)
     if data.get("generation_binding") != binding:
         raise ValueError("Inputs changed; revise before generating")
@@ -380,6 +849,17 @@ def invalidate(data: dict, stages: set[str]) -> None:
             approval["invalidated_at"] = datetime.now(timezone.utc).isoformat()
 
 
+def check_revision_ready(root: Path, project: dict, data: dict) -> None:
+    if data["status"] in {"storyboard_generating", "running"} and data.get("generation_claimed"):
+        try:
+            # The attempt can finish under old inputs. Current-input approval is
+            # still required separately to approve an image or generate again.
+            review_image_artifact(root, data)
+        except (ValueError, FileNotFoundError) as exc:
+            raise ValueError("Wait for the claimed generation to finish and record QA, "
+                             "or record its actual failure before revision") from exc
+
+
 def revise(root: Path, shot_id: str, stage: str, reason: str) -> None:
     if not reason or not reason.strip():
         raise ValueError("Revision requires the user's explicit request")
@@ -389,8 +869,10 @@ def revise(root: Path, shot_id: str, stage: str, reason: str) -> None:
     row = find_shot(project, shot_id)
     path = shot_json_path(root, shot_id)
     data = read_json(path)
+    check_revision_ready(root, project, data)
     if stage == "storyboard_prompt":
         invalidate(data, {"storyboard_prompt", "storyboard", "video_prompt", "review_package"})
+        data.pop("prompt_review", None)
         data["generation_binding"] = None
         data["generation_claimed"] = False
         data["status"] = "todo" if review_mode_for(data) == "fast" else "storyboard_prompt_pending"
@@ -411,16 +893,54 @@ def revise(root: Path, shot_id: str, stage: str, reason: str) -> None:
             frozen_binding(root, project, data)
             invalidate(data, {"video_prompt"})
             data["status"] = "video_prompt_pending"
+    data.pop("artifact_review", None)
     data.setdefault("revisions", []).append({"stage": stage, "reason": reason, "at": datetime.now(timezone.utc).isoformat()})
     row["status"] = data["status"]
     write_json(path, data)
     write_json(root / "project.json", project)
 
 
+def revise_designs(root: Path, shot_ids: list[str], reason: str) -> None:
+    """Retire a user-selected group of assignments together, preserving history."""
+    if not reason or not reason.strip() or not shot_ids or len(set(shot_ids)) != len(shot_ids):
+        raise ValueError("Design revision requires unique shot IDs and the user's explicit reason")
+    project = read_json(root / "project.json")
+    if not project.get("workflow", {}).get("content_plan_required"):
+        raise ValueError("This legacy project does not use content planning")
+    updates = []
+    at = datetime.now(timezone.utc).isoformat()
+    for sid in shot_ids:
+        row = find_shot(project, sid)
+        data = read_json(shot_json_path(root, sid))
+        if row.get("task", {}).get("active"):
+            raise ValueError("Stop and release affected shot tasks before grouped design revision")
+        check_revision_ready(root, project, data)
+        for approval in data.get("design_approvals", []):
+            approval.setdefault("invalidated_at", at)
+        invalidate(data, {"storyboard_prompt", "storyboard", "video_prompt", "review_package"})
+        for key in ("design_review", "prompt_review", "plan_check", "artifact_review"):
+            data.pop(key, None)
+        data.update(generation_binding=None, generation_claimed=False,
+                    status="todo" if review_mode_for(data) == "fast" else "storyboard_prompt_pending")
+        data.setdefault("revisions", []).append({"stage": "creative_design", "group": shot_ids,
+                                                 "reason": reason.strip(), "at": at})
+        row["status"] = data["status"]
+        updates.append((shot_json_path(root, sid), data))
+    for path, data in updates:
+        write_json(path, data)
+    write_json(root / "project.json", project)
+
+
 def check_state(root: Path, project: dict, data: dict) -> None:
     status = data["status"]
-    if status in {"storyboard_generating", "running", "generation_failed", "failed"}:
+    if status in {"storyboard_generating", "running"}:
         check_generation(root, project, data)
+    if status in {"generation_failed", "failed"}:
+        # Failure records what happened to the previous attempt; stale inputs
+        # must not prevent recording it. Retry still checks current approvals.
+        origins = {"storyboard_generating", "video_prompt_pending"} if status == "generation_failed" else {"running"}
+        if data.get("failed_from") not in origins:
+            raise ValueError("Failure needs its original execution phase")
     if status == "storyboard_review_pending":
         review_binding(root, project, data)
     if status == "review_pending":
@@ -464,6 +984,8 @@ def write_shot_status(root: Path, project: dict, shot_id: str, status: str) -> d
             shot_data["generation_claimed"] = False
         shot_data["status"] = status
         check_state(root, project, shot_data)
+        if status in ARTIFACT_REVIEW_STAGES:
+            record_artifact_review(root, project, shot_data)
         write_json(path, shot_data)
         return shot_data
     write_json(legacy_state_path(root, shot_id), {"shot_id": shot_id, "status": status})
@@ -500,6 +1022,8 @@ def set_review_mode(root: Path, shot_id: str, mode: str, reason: str | None) -> 
     reason = reason.strip() if reason else None
     if mode == "fast" and not reason:
         raise ValueError("Fast mode requires the user's explicit request in --reason")
+    if mode == "fast" and shot.get("task", {}).get("active"):
+        raise ValueError("Release the active shot task before switching to fast mode")
     shot_data["review_mode"] = mode
     shot_data["review_mode_source"] = "explicit_user_request" if reason else "default"
     shot_data["review_mode_reason"] = reason
@@ -508,7 +1032,8 @@ def set_review_mode(root: Path, shot_id: str, mode: str, reason: str | None) -> 
     write_json(project_path, project)
 
 
-def approve(root: Path, shot_id: str, stage: str, note: str | None) -> None:
+def approve(root: Path, shot_id: str, stage: str, note: str | None,
+            review_id: str | None = None, confirmation: str | None = None) -> None:
     project_path = root / "project.json"
     project = read_json(project_path)
     if project.get("schema_version") != 4:
@@ -525,23 +1050,33 @@ def approve(root: Path, shot_id: str, stage: str, note: str | None) -> None:
         raise ValueError(f"Cannot approve {stage}: expected {expected}, got {shot_data.get('status')}")
     if stage == "storyboard_prompt":
         binding = input_binding(root, project, shot_data)
+        review = shot_data.get("prompt_review") or {}
+        if not review_id or not confirmation or not confirmation.strip():
+            raise ValueError("Prompt approval requires current --review-id and explicit --confirmation")
+        if review.get("id") != review_id or review.get("binding") != binding:
+            raise ValueError("Missing or stale prompt review; prepare and show the current review first")
+        if review.get("summary_hash") != fingerprint(prompt_review_summary(shot_data)):
+            raise ValueError("Prompt review summary changed; prepare and show it again")
+        require_plan_check(shot_data, binding)
         shot_data["generation_binding"] = binding
         shot_data["generation_claimed"] = False
-    elif stage == "storyboard":
-        binding = review_binding(root, project, shot_data)
-        freeze(root, shot_data, binding)
-        if delivery_scope(project) == "storyboard_only":
-            target = "complete"
-    elif stage == "video_prompt":
-        binding = video_binding(root, project, shot_data)
     else:
-        binding = video_binding(root, project, shot_data, fast=True) if delivery_scope(project) == "storyboard_and_video_prompt" else review_binding(root, project, shot_data)
-        freeze(root, shot_data, binding.get("storyboard", binding))
-    shot_data.setdefault("approvals", []).append({
+        binding = artifact_binding(root, project, shot_data, stage)
+        require_artifact_review(shot_data, stage, binding, review_id, confirmation)
+        if stage in {"storyboard", "review_package"}:
+            freeze(root, shot_data, binding.get("storyboard", binding))
+        if stage == "storyboard" and delivery_scope(project) == "storyboard_only":
+            target = "complete"
+    approval_record = {
         "binding": binding,
         "stage": stage, "decision": "approved", "note": note,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    if stage == "storyboard_prompt":
+        approval_record.update(prompt_review_id=review_id, confirmation=confirmation.strip())
+    else:
+        approval_record.update(artifact_review_id=review_id, confirmation=confirmation.strip())
+    shot_data.setdefault("approvals", []).append(approval_record)
     shot_data["status"] = target
     shot["status"] = target
     if (mode == "staged" and stage == "storyboard") or target == "complete":
@@ -568,7 +1103,7 @@ def sync_statuses(root: Path) -> None:
     write_json(path, project)
 
 
-def set_concurrency(root: Path, mode: str, pilot_count: int | None = None) -> None:
+def set_concurrency(root: Path, mode: str, pilot_count: int | None = None, reason: str | None = None) -> None:
     path = root / "project.json"
     project = read_json(path)
     if project.get("schema_version") != 4:
@@ -576,24 +1111,37 @@ def set_concurrency(root: Path, mode: str, pilot_count: int | None = None) -> No
     shots = len(project.get("shots", []))
     if shots <= 1:
         raise ValueError("Single storyboard stays in the current conversation")
+    if all(review_mode_for(read_json(shot_json_path(root, row["id"]))) == "fast" for row in project["shots"]):
+        raise ValueError("Fast-mode shots stay in the current conversation; no concurrency tasks")
+    content_plan(root, project)
     active = sum(1 for shot in project.get("shots", []) if shot.get("task", {}).get("active") is True)
     if active:
         raise ValueError("Release active shot tasks before changing the concurrency choice")
+    workflow = project.setdefault("workflow", {})
+    if workflow.get("parallel_launch_mode") is not None and (not reason or not reason.strip()):
+        raise ValueError("Continuing or changing the launch choice requires the user's explicit --reason")
+    if uses_prepared_handoff(project) and workflow.get("parallel_launch_mode") is None:
+        for row in project["shots"]:
+            data = read_json(shot_json_path(root, row["id"]))
+            if review_mode_for(data) == "staged":
+                require_prepared_prompt(root, project, data)
     if mode == "all":
         maximum = shots
     elif mode == "pilot":
-        if pilot_count not in (1, 2):
+        if isinstance(pilot_count, bool) or pilot_count not in (1, 2):
             raise ValueError("Pilot mode requires --count 1 or 2")
         maximum = min(pilot_count, shots)
     else:
         raise ValueError("Concurrency mode must be all or pilot")
-    workflow = project.setdefault("workflow", {})
     workflow["execution_model"] = "coordinator_with_shot_slots"
     workflow["cross_shot_parallel"] = True
     workflow["one_visible_task_per_shot"] = True
-    workflow["video_prompt_owner"] = "coordinator"
+    workflow["video_prompt_owner"] = "shot_task" if uses_prepared_handoff(project) else "coordinator"
     workflow["parallel_launch_mode"] = mode
     workflow["max_parallel_shot_tasks"] = maximum
+    workflow["pilot_shot_ids"] = [] if mode == "pilot" else None
+    workflow.setdefault("launch_history", []).append({"mode": mode, "count": maximum,
+                                                      "reason": reason, "at": datetime.now(timezone.utc).isoformat()})
     write_json(path, project)
 
 
@@ -607,11 +1155,18 @@ def register_task(root: Path, shot_id: str, thread_id: str, host_id: str | None)
         raise ValueError("Task is already assigned to another active shot")
     if len(project.get("shots", [])) <= 1:
         raise ValueError("Single storyboard stays in the current conversation")
+    current_task = shot.get("task", {})
+    if current_task.get("active") is True:
+        if current_task.get("thread_id") == thread_id and current_task.get("host_id") == host_id:
+            return
+        raise ValueError("Shot already has an active task; stop and release it before registering a replacement")
     if project.get("schema_version") >= 4:
         latest = read_json(shot_json_path(root, shot_id))
+        if review_mode_for(latest) == "fast":
+            raise ValueError("Fast-mode shots stay in the current conversation; cannot register a task")
         shot["status"] = latest["status"]
         if shot.get("status") in {"video_prompt_pending", "video_prompt_review_pending", "complete"}:
-            raise ValueError("Shot task cannot be activated during coordinator-owned video-prompt stages")
+            raise ValueError("Image-generation slots are not activated for video-prompt or completed stages")
         workflow = project.get("workflow", {})
         maximum = workflow.get("max_parallel_shot_tasks")
         if workflow.get("parallel_launch_mode") not in {"all", "pilot"} or maximum is None:
@@ -619,12 +1174,23 @@ def register_task(root: Path, shot_id: str, thread_id: str, host_id: str | None)
                 "Concurrency choice is not recorded; ask whether to start all shots or pilot 1-2, "
                 "then run set-concurrency"
             )
+        content_plan(root, project, shot_id)
+        if uses_prepared_handoff(project) and not current_task.get("thread_id"):
+            require_prepared_prompt(root, project, latest)
         active = sum(
             1 for item in project["shots"]
             if item["id"] != shot_id and item.get("task", {}).get("active") is True
         )
         if active >= maximum:
             raise ValueError(f"No shot-task slot available; maximum active tasks is {maximum}")
+        if workflow["parallel_launch_mode"] == "pilot":
+            cohort = workflow.get("pilot_shot_ids")
+            if not isinstance(cohort, list):
+                raise ValueError("Legacy pilot choice lacks a shot cohort; record the user's next choice with set-concurrency")
+            if shot_id not in cohort:
+                if len(cohort) >= maximum:
+                    raise ValueError("Pilot scope exhausted; ask the user how to continue and record a new launch choice")
+                cohort.append(shot_id)
         shot["task"] = {"thread_id": thread_id, "host_id": host_id, "active": True}
     else:
         shot["task"] = {"thread_id": thread_id, "host_id": host_id}
@@ -675,13 +1241,14 @@ def retry_shot(root: Path, shot_id: str, target: str, reason: str | None) -> Non
         frozen_binding(root, project, data)
         invalidate(data, {"video_prompt"})
     data["status"] = target
+    data.pop("artifact_review", None)
     shot["status"] = target
     write_json(shot_path, data)
     write_json(project_path, project)
 
 
 STATUS_LABELS = {
-    "todo": "未开始", "storyboard_prompt_pending": "提示词待确认",
+    "todo": "未开始", "storyboard_prompt_pending": "创意设计待确认",
     "storyboard_generating": "分镜生成中", "storyboard_review_pending": "分镜待确认",
     "video_prompt_pending": "视频提示词待生成", "video_prompt_review_pending": "视频提示词待确认",
     "running": "快速生成中", "review_pending": "完整包待确认",
@@ -712,28 +1279,124 @@ def task_brief(root: Path, shot_id: str) -> str:
     shot_path = shot_json_path(root, shot_id)
     latest = read_json(shot_path) if shot_path.is_file() else shot
     status = latest.get("status")
-    if status == "complete":
+    local = len(project["shots"]) == 1 or review_mode_for(latest) == "fast"
+    prepared_child = uses_prepared_handoff(project) and not local
+    first_handoff = prepared_child and not shot.get("task", {}).get("thread_id")
+    if first_handoff:
+        require_prepared_prompt(root, project, latest)
+    review_state = None
+    if status == "storyboard_prompt_pending" and latest.get("prompt_review"):
+        try:
+            binding = input_binding(root, project, latest)
+            require_plan_check(latest, binding)
+            review = latest["prompt_review"]
+            review_state = "waiting" if (review.get("binding") == binding and
+                           review.get("summary_hash") == fingerprint(prompt_review_summary(latest))) else "stale"
+        except (ValueError, FileNotFoundError, KeyError):
+            review_state = "stale"
+    if review_state == "waiting":
+        next_step = "当前提示词审核记录有效；展示后停止并等待用户明确确认，不要继续编写或改写。"
+    elif review_state == "stale":
+        next_step = "当前提示词审核已过期；核对变化并重新提交审核，不得沿用旧回复批准或自行改写。"
+    elif status == "complete":
         next_step = "请求范围已完成；仅按用户新的修改要求继续。"
-    elif len(project.get("shots", [])) == 1:
-        next_step = "单张分镜在当前对话执行，不创建子任务；遵循当前阶段的审核要求。"
     elif status in {"video_prompt_pending", "video_prompt_review_pending"}:
-        next_step = "此阶段由总控对话负责；不要在镜头任务中生成最终视频提示词。"
+        if prepared_child or local:
+            next_step = ("在本对话依据已批准并冻结的分镜图编写视频提示词，完成后提交用户审核。"
+                         if status == "video_prompt_pending" else
+                         "视频提示词已提交；在本对话等待用户对当前版本的确认，不要重新编写。")
+            next_step += " 此阶段不占生图名额，不需要重新 register-task 或调用 preflight。"
+        else:
+            next_step = "此阶段由总控对话负责；不要在镜头任务中生成最终视频提示词。"
     elif status in {"storyboard_review_pending", "review_pending"}:
         next_step = "当前产物正在等待用户审核；停止并等待明确决定。"
     elif status in {"generation_failed", "failed"}:
         next_step = "生成已失败；不要自动重试，停止并等待用户决定。"
+    elif status in {"storyboard_generating", "running"}:
+        next_step = "提示词已就绪；先检查当前生成授权和 preflight 记录，不要重写提示词或重复调用生图。"
     else:
         next_step = "只执行当前状态允许的下一步；使用workflow命令更新状态，不手改批准记录。"
+    if status in ARTIFACT_REVIEW_STAGES:
+        review = latest.get("artifact_review") or {}
+        stage = ARTIFACT_REVIEW_STAGES[status]
+        try:
+            current = (bool(review.get("id")) and review.get("stage") == stage
+                       and review.get("binding") == artifact_binding(root, project, latest, stage)
+                       and review.get("qa_hash") == fingerprint(latest.get("qa")))
+        except (ValueError, FileNotFoundError, KeyError):
+            current = False
+        next_step += (" 当前产物审核记录有效，等待对该版本的明确确认。" if current else
+                      " 当前产物审核缺失或已过期；由负责审核的对话核对产物，运行 prepare-artifact-review 后重新展示，不得沿用旧回复。")
+    drafting = status in {"todo", "storyboard_prompt_pending"} and review_state is None
+    design_pending = False
+    plan = None
+    # An assigned child must be able to resume its own creative revision before
+    # its new design has been approved. Initial handoffs were checked above.
+    if prepared_child and status in {"todo", "storyboard_prompt_pending"}:
+        try:
+            plan = content_plan(root, project, shot_id, require_approved=False)
+        except (ValueError, FileNotFoundError, KeyError):
+            design_pending = True
+            next_step = "本镜头设计资料尚不完整；按用户修改要求补齐本镜头条目并核对，再在本对话提交创意确认，不得生图。"
+        if plan:
+            entry = next(item for item in plan["shots"] if item["shot_id"] == shot_id)
+            try:
+                require_design_approval(root, plan, entry)
+            except ValueError:
+                design_pending = True
+                review = latest.get("design_review") or {}
+                current = bool(review.get("id")) and review.get("binding") == fingerprint(design_snapshot(plan, entry))
+                next_step = ("本镜头当前创意审核记录有效；在本对话展示并等待用户确认，不要重建审核标识。" if current else
+                             "本镜头修改后的创意尚未确认；在本对话运行 prepare-design-review，展示具体画面变化并等待用户确认。")
+                next_step += " 创意确认后再更新技术提示词和四格数据、执行 check-prompt-plan，然后提交提示词确认；不得沿用旧批准生图。"
+    elif drafting:
+        plan = content_plan(root, project, shot_id)
     root = root.resolve()
+    assignment = next((item for item in plan["shots"] if item["shot_id"] == shot_id), None) if plan else None
+    plan_line = f"- {root / 'content-plan.json'} 中 {shot_id} 的分工与确认记录\n" if assignment else ""
+    assignment_line = ""
+    if prepared_child:
+        delivery_work = "视频提示词及交付" if delivery_scope(project) == "storyboard_and_video_prompt" else "图片交付"
+        assignment_line = (
+            f"本子对话独立负责本镜头的提示词确认与修改、生图、标签、QA、图片审核及{delivery_work}；不回主对话汇总或审核。\n"
+            "局部创意修改只更新 content-plan.json 的本镜头条目，保留其他条目和全局字段；使用现有整文件版本校验保存，冲突时重读合并。"
+            "涉及全局或其他镜头的修改应先另行协调，不自行扩大范围。\n"
+        )
+        if not design_pending and drafting:
+            try:
+                require_prepared_prompt(root, project, latest)
+                next_step = "当前完整提示词和四格数据已准备好；不要重写。运行 prepare-prompt-review，在本子对话展示并等待用户确认；批准前不得生图。"
+            except (ValueError, FileNotFoundError, KeyError):
+                next_step = "按用户明确要求在本子对话补齐或修改提示词和四格数据，执行 check-prompt-plan 核对当前创意及跨镜头避重，再提交提示词确认；不需要主对话复核。"
+        elif not design_pending and review_state == "stale":
+            next_step += " 在本子对话核对当前提示词并执行 check-prompt-plan 后重新提交，不需要主对话复核。"
+        if first_handoff:
+            next_step = ("完整初稿已交接；先等待总控登记真实任务 ID 并告知本任务自己的身份，再开始本子对话的提示词展示与确认。"
+                         "登记前不要运行 prepare-prompt-review 或 approve；登记后重新读取 task-brief，已有有效审核记录则复用，不要重建。")
+    elif assignment:
+        responsible = "当前对话" if local else "总控"
+        assignment_line = f"按已确认的四格画面与景别写技术提示词；由{responsible}执行 check-prompt-plan 核对。\n"
+        if review_mode_for(latest) == "staged":
+            assignment_line += f"先由{responsible}核对；未完成当前版本的提示词审核批准前不得生图。\n"
+        else:
+            assignment_line += "按用户明确的快速模式授权继续，不额外等待逐阶段批准。\n"
+    route = "在当前对话处理，不创建子任务。\n" if local else ""
+    identity_hint = ("多张分阶段生图须使用本任务自己的 thread_id 和 host_id（如有）。"
+                     "总控在创建并登记任务后单独告知；未收到前不要调用 preflight，"
+                     "也不要从 project.json 抄当前登记的负责人作为调用身份。\n") if not local else ""
+    prompt_hint = ("（已交接初稿；仅按用户明确修改要求修订）" if prepared_child else
+                   "（缺失先按模板保存）" if drafting else "（只读；遵循当前状态）")
     result = (
         f"处理 {shot_id}。\n\n读取：\n"
         f"- {Path(__file__).resolve().parents[1] / 'SKILL.md'}\n"
         f"- {Path(__file__).resolve().parents[1] / 'references' / 'execution.md'}\n"
         f"- {root / 'shared-brief.md'}\n"
+        f"{plan_line}"
         f"- {root / 'shots' / shot_id / 'shot.json'}\n"
-        f"- {root / 'shots' / shot_id / 'storyboard-prompt.md'}（缺失先按模板保存）\n"
+        f"- {root / 'shots' / shot_id / 'storyboard-prompt.md'}{prompt_hint}\n"
         f"- {root / 'project.json'} 中的公共设置\n\n"
-        f"{next_step}\n"
+        f"{route}{identity_hint}{next_step}\n"
+        f"{assignment_line}"
         "不要重新解释或复制全局规则。不要自动重试图片生成。"
     )
     print(result)
@@ -808,7 +1471,9 @@ def validate_workflow(root: Path, project: dict) -> None:
         raise ValueError("parallel_launch_mode must be null, all, or pilot")
     if workflow.get("retry_policy") != "explicit_user_request_only":
         raise ValueError("Schema v4 requires explicit-user retry policy")
-    if workflow.get("video_prompt_owner") not in {"coordinator", "current_conversation"}:
+    if "handoff_model" in workflow and workflow["handoff_model"] != PREPARED_PROMPT_HANDOFF:
+        raise ValueError("Invalid handoff model")
+    if workflow.get("video_prompt_owner") not in {"coordinator", "current_conversation", "shot_task"}:
         raise ValueError("Invalid video prompt owner")
     if len(project.get("shots", [])) == 1 and launch_mode is not None:
         raise ValueError("Single storyboard cannot use parallel shot tasks")
@@ -819,10 +1484,23 @@ def validate_workflow(root: Path, project: dict) -> None:
     if not brief.is_relative_to(root.resolve()) or not brief.is_file():
         raise ValueError("Invalid or missing shared brief")
     active = sum(1 for shot in project.get("shots", []) if shot.get("task", {}).get("active") is True)
+    for shot in project.get("shots", []):
+        if shot.get("task", {}).get("active"):
+            if review_mode_for(read_json(shot_json_path(root, shot["id"]))) == "fast":
+                raise ValueError("Fast-mode shots cannot have active tasks")
+            content_plan(root, project, shot["id"])
     if launch_mode is None and active:
         raise ValueError("Shot tasks cannot be active before the concurrency choice is recorded")
     if maximum is not None and active > maximum:
         raise ValueError(f"Active shot tasks exceed configured maximum of {maximum}")
+    if launch_mode == "pilot":
+        cohort = workflow.get("pilot_shot_ids")
+        ids = {row["id"] for row in project["shots"]}
+        if (not isinstance(cohort, list) or any(not isinstance(sid, str) or sid not in ids for sid in cohort)
+                or len(cohort) != len(set(cohort)) or len(cohort) > maximum):
+            raise ValueError("Invalid or legacy pilot cohort; record the user's next launch choice")
+        if any(row.get("task", {}).get("active") and row["id"] not in cohort for row in project["shots"]):
+            raise ValueError("Active task is outside the authorized pilot cohort")
 
 
 def validate(root: Path) -> None:
@@ -888,7 +1566,7 @@ def migrate(root: Path) -> None:
         raise ValueError("Automatic migration currently supports schema v3 only")
     if backup_path.exists():
         raise FileExistsError(f"Refusing to overwrite backup: {backup_path}")
-    shutil.copy2(project_path, backup_path)
+    atomic_bytes(backup_path, project_path.read_bytes())
     try:
         defaults = project["defaults"]
         defaults.setdefault("duration_seconds", 4)
@@ -956,11 +1634,11 @@ def migrate(root: Path) -> None:
             shot_backup = shot_path.with_name("shot.json.bak")
             if shot_backup.exists():
                 raise FileExistsError(f"Refusing to overwrite backup: {shot_backup}")
-            shutil.copy2(shot_path, shot_backup)
+            atomic_bytes(shot_backup, shot_path.read_bytes())
             write_json(shot_path, data)
         write_json(project_path, project)
     except Exception:
-        shutil.copy2(backup_path, project_path)
+        # The transaction journal restores only files written by this migration.
         raise
 
 
@@ -971,7 +1649,7 @@ def main() -> None:
     init.add_argument("root", type=Path)
     init.add_argument("--name", required=True)
     init.add_argument("--shots", type=int, default=1)
-    init.add_argument("--delivery", choices=("storyboard_only", "storyboard_and_video_prompt"), default="storyboard_only")
+    init.add_argument("--delivery", choices=("storyboard_only", "storyboard_and_video_prompt"), default="storyboard_and_video_prompt")
     init.add_argument("--duration", type=float, default=4)
     source = sub.add_parser("add-source")
     source.add_argument("root", type=Path)
@@ -992,12 +1670,45 @@ def main() -> None:
     approval.add_argument("shot_id")
     approval.add_argument("stage", choices=("storyboard_prompt", "storyboard", "video_prompt", "review_package"))
     approval.add_argument("--note")
+    approval.add_argument("--review-id")
+    approval.add_argument("--confirmation")
+    prompt_review_cmd = sub.add_parser("prepare-prompt-review")
+    prompt_review_cmd.add_argument("root", type=Path)
+    prompt_review_cmd.add_argument("shot_id")
+    artifact_review_cmd = sub.add_parser("prepare-artifact-review")
+    artifact_review_cmd.add_argument("root", type=Path)
+    artifact_review_cmd.add_argument("shot_id")
+    design_review_cmd = sub.add_parser("prepare-design-review")
+    design_review_cmd.add_argument("root", type=Path)
+    design_review_cmd.add_argument("shot_id")
+    design_approval = sub.add_parser("approve-design")
+    design_approval.add_argument("root", type=Path)
+    design_approval.add_argument("shot_id")
+    design_approval.add_argument("--review-id", required=True)
+    design_approval.add_argument("--confirmation", required=True)
+    plan_check = sub.add_parser("check-prompt-plan")
+    plan_check.add_argument("root", type=Path)
+    plan_check.add_argument("shot_id")
+    plan_check.add_argument("--note", required=True)
+    content_read = sub.add_parser("content-revision")
+    content_read.add_argument("root", type=Path)
+    content_read.add_argument("relative")
+    content_save = sub.add_parser("save-content")
+    content_save.add_argument("root", type=Path)
+    content_save.add_argument("relative")
+    content_save.add_argument("--from-file", type=Path, required=True)
+    content_save.add_argument("--expected-hash", required=True)
+    designs = sub.add_parser("revise-designs")
+    designs.add_argument("root", type=Path)
+    designs.add_argument("shot_ids", nargs="+")
+    designs.add_argument("--reason", required=True)
     sync = sub.add_parser("sync")
     sync.add_argument("root", type=Path)
     concurrency = sub.add_parser("set-concurrency")
     concurrency.add_argument("root", type=Path)
     concurrency.add_argument("mode", choices=("all", "pilot"))
     concurrency.add_argument("--count", type=int)
+    concurrency.add_argument("--reason")
     task = sub.add_parser("register-task")
     task.add_argument("root", type=Path)
     task.add_argument("shot_id")
@@ -1023,6 +1734,8 @@ def main() -> None:
     pre = sub.add_parser("preflight")
     pre.add_argument("root", type=Path)
     pre.add_argument("shot_id")
+    pre.add_argument("--thread-id")
+    pre.add_argument("--host-id")
     revision = sub.add_parser("revise")
     revision.add_argument("root", type=Path)
     revision.add_argument("shot_id")
@@ -1040,11 +1753,27 @@ def main() -> None:
     elif args.command == "set-mode":
         set_review_mode(args.root, args.shot_id, args.mode, args.reason)
     elif args.command == "approve":
-        approve(args.root, args.shot_id, args.stage, args.note)
+        approve(args.root, args.shot_id, args.stage, args.note, args.review_id, args.confirmation)
+    elif args.command == "prepare-prompt-review":
+        prepare_prompt_review(args.root, args.shot_id)
+    elif args.command == "prepare-artifact-review":
+        prepare_artifact_review(args.root, args.shot_id)
+    elif args.command == "prepare-design-review":
+        prepare_design_review(args.root, args.shot_id)
+    elif args.command == "approve-design":
+        approve_design(args.root, args.shot_id, args.review_id, args.confirmation)
+    elif args.command == "check-prompt-plan":
+        check_prompt_plan(args.root, args.shot_id, args.note)
+    elif args.command == "content-revision":
+        content_revision(args.root, args.relative)
+    elif args.command == "save-content":
+        save_content(args.root, args.relative, args.from_file, args.expected_hash)
+    elif args.command == "revise-designs":
+        revise_designs(args.root, args.shot_ids, args.reason)
     elif args.command == "sync":
         sync_statuses(args.root)
     elif args.command == "set-concurrency":
-        set_concurrency(args.root, args.mode, args.count)
+        set_concurrency(args.root, args.mode, args.count, args.reason)
     elif args.command == "register-task":
         register_task(args.root, args.shot_id, args.thread_id, args.host_id)
     elif args.command == "release-task":
@@ -1058,7 +1787,7 @@ def main() -> None:
     elif args.command == "validate":
         validate(args.root)
     elif args.command == "preflight":
-        preflight(args.root, args.shot_id)
+        preflight(args.root, args.shot_id, args.thread_id, args.host_id)
     elif args.command == "revise":
         revise(args.root, args.shot_id, args.stage, args.reason)
     elif args.command == "migrate":
@@ -1066,9 +1795,9 @@ def main() -> None:
 
 
 # Serialize each complete read/modify/write operation; recover interrupted mutations first.
-for _name in ("add_source", "set_status", "set_review_mode", "approve", "sync_statuses", "set_concurrency", "register_task", "release_task", "retry_shot", "revise", "preflight", "migrate"):
+for _name in ("add_source", "set_status", "set_review_mode", "approve", "prepare_prompt_review", "prepare_artifact_review", "prepare_design_review", "approve_design", "check_prompt_plan", "save_content", "revise_designs", "sync_statuses", "set_concurrency", "register_task", "release_task", "retry_shot", "revise", "preflight", "migrate"):
     globals()[_name] = transaction(globals()[_name])
-for _name in ("validate", "dashboard", "task_brief"):
+for _name in ("validate", "dashboard", "task_brief", "content_revision"):
     globals()[_name] = consistent_read(globals()[_name])
 
 if __name__ == "__main__":

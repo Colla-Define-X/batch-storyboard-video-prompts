@@ -2,23 +2,22 @@
 
 Use the approved `shared-brief.md`, shot manifest, and stabilized source images to fill these templates. The examples are structural, not copy to paste defaults: preserve the project's actual ratio, duration, style, audio, reference roles, and review mode. Keep project or product specific wording in the project brief.
 
-## Compact global confirmation
+## User-facing creative checkpoints
 
 ```text
-画幅 / 布局 / 时长：9:16 / 2x2 / 默认4秒
-时长规则：每镜头不少于4秒；大部分为4–10秒；四格时间按已确认时长派生
-视觉与声音：<shared style, continuity, audio>
-审核方式：分阶段确认提示词与分镜图；需要视频提示词时再确认；明确要求快速模式时合并审核
-数量与执行：未指定数量默认1张；单张在当前对话确认与制作；多张且需要创建并发任务时，再询问“全部开始”或“先做1–2个看效果”
-交付：默认带标签分镜图；用户要求时增加视频提示词；不自动生成付费视频
-模式判定：普通“生成/批量生成/生成分镜图”仍为分阶段审核；只有用户明确要求直接生成、跳过确认或合并审核时才使用快速模式
-
-镜头映射：<shot -> images and narrow roles>
+先判断用户要故事演绎、产品展示，还是两者结合；不确定时用一句话询问。
+根据真实产品信息给出一套推荐设计。每张只突出一个主卖点；多卖点冲突时提出优先级建议，让用户决定取舍。
+对每张图用四句短话说明四格分别拍什么，逐张确认。连续视频先用一句话说明整支内容如何推进。
+确认用户看得懂的场景、动作、卖点和结果；不要展示技术参数。
 ```
+
+Keep technical syntax out of the short conversational summary, but link the complete saved prompt file for inspection before staged approval. Default delivery is the storyboard plus its matching video prompt; after the storyboard is approved as usable, prepare the video prompt automatically. “直接生成 / 跳过流程 / 无需审核 / 只生成就行” selects fast review but does not remove the video prompt unless the user explicitly says they do not want it.
+
+For a new multi-shot staged project, the coordinator binds each shown initial creative design using `prepare-design-review` and `approve-design`, then completes every initial full prompt and matching shot fields before concurrency choice. Keep the approved core descriptions verbatim when extending them into the technical prompt. Copy context, main selling point, purpose, four beats and scales to the matching structured shot fields; see [schema.md](schema.md). After the actual design and cross-shot review, record each initial `check-prompt-plan` before handing prompts to shot conversations. Later local revisions are checked by the responsible shot conversation. Fast mode still performs its internal check, without adding user checkpoints; legacy unmarked multi-shot projects keep their existing division of work.
 
 ## Per-shot staged review
 
-分阶段模式先直接嵌入本镜头实际使用的原始参考图，每张图后紧跟“图片编号 → 本镜头职责”，随后提交完整分镜生成提示词并等待确认。默认不得为了预览另行生成或拼合图片。提示词获批后才生成、QA、标注并提交分镜图。仅在组合交付时，分镜获批后再提交视频提示词。明确要求快速模式时合并审核。
+分阶段模式先展示本镜头实际使用的原始参考图，再展示对应的技术提示词审核。新多张分阶段项目的初版完整提示词已由总控写好并核对；子对话取得真实登记身份后运行 `prepare-prompt-review`，在自己的对话中展示命令生成的简明方案，并用绝对路径链接提供现有 `storyboard-prompt.md`，不得因为接手而重新起稿。完整提示词须包含简明方案的全部核心内容，技术细节只作延展。等用户对当前镜头当前版本明确确认后，该子对话继续生成、QA、标注、图片审核、视频提示词和交付。无标记旧多张项目仍由总控核对并提交提示词审核；单张仍在当前对话。明确要求快速模式时合并审核。
 
 ```markdown
 ## 参考图预览
@@ -31,11 +30,13 @@ Use the approved `shared-brief.md`, shot manifest, and stabilized source images 
 
 `image-03`：手部动作、构图
 
-## 分镜生成提示词
+## 待确认的本镜头方案
 
-<complete prompt>
+<prepare-prompt-review 生成的视觉风格、核心卖点和四格内容>
 
-请确认，或说明需要如何修改。确认前不会生成分镜图。
+[完整生成提示词](/absolute/project/path/shots/shot-01/storyboard-prompt.md)
+
+请确认这张图的当前方案与完整提示词，或指出需要修改的地方。
 ```
 
 ## Storyboard image generation prompt
@@ -56,19 +57,15 @@ Use the following Chinese prompt as the standard starting point for each product
 【产品还原】
 产品照片是主体外观的唯一依据，准确保留产品的颜色、材质、比例、结构、图案及配件。格式参考图只用于参考排版、摄影风格和标签样式，不要将参考图中的产品或装饰图案混入新图。【未提供格式参考图时，删除前一句。】
 
-【摄影风格】
-写实生活方式产品摄影，温暖自然的木质桌面，柔和侧向日光，真实阴影，统一色温与曝光。产品占据画面主要区域，使用斜向摆放、俯拍和局部特写增加变化。背景简洁，少量环境道具只能位于边缘，不遮挡主体。避免插画感、塑料渲染感和过度磨皮。【如项目已确认不同场景与光线，用已确认设置替换本段。】
+【内容职责与摄影风格】
+本张分镜用于【已确认的使用情境或展示情境】，重点表现【已确认的主卖点】，承担【本张在整批内容中的作用】。按已确认的风格、场景、光线与产品约束拍摄。四格使用【已确认的景别安排】，景别变化服务于动作或信息，不机械套用固定远近顺序。避免重复其他分镜的【已分配给其他分镜的开头、动作或结尾】。
 
 【四格内容】
-左上：产品完整外观，展示主要造型与装饰，画面清晰完整。
-标签：“0–1秒 外观展示”
-右上：展示产品内部、展开状态或第二个重要展示面，突出结构与内容。
-标签：“1–2秒 结构展示”
-左下：展示一个真实使用动作或功能细节，可出现自然的手部操作。动作必须符合产品实际结构，不虚构功能。
-标签：“2–3秒 使用细节”
-右下：回到产品最有辨识度的外观，以更精致的角度展示材质和图案，作为视频结束定格。
-标签：“3–4秒 产品定格”
-如果产品不适合展开或手部操作，应根据真实特点改为其他角度或材质特写，并同步调整标签名称。【将各格改写为本镜头可见、连贯的具体状态；不要保留不适用的动作。】
+左上：【第1格已确认的具体画面、景别和可见状态】。标签：“【第1段时间与名称】”
+右上：【第2格已确认的具体画面、景别和新增动作或信息】。标签：“【第2段时间与名称】”
+左下：【第3格已确认的具体画面、景别和新增动作或信息】。标签：“【第3段时间与名称】”
+右下：【第4格已确认的具体画面、景别与最终状态】。标签：“【第4段时间与名称】”
+故事型分镜保持可理解的进展；展示型分镜可以用不同细节或视角组合，不强加人物故事。首尾相似只用于有明确目的且状态可见变化的呼应。
 
 【标签样式】
 每格底部居中放置一个小型奶油色圆角矩形标签，使用清晰的黑色中文字体。标签宽度适配文字，四格字号、内边距和位置保持一致，与画面底边留出安全距离，不遮挡产品重点。
@@ -82,6 +79,8 @@ Before presenting, replace placeholder values and remove drafting notes; keep th
 ## Optional fast per-shot review package
 
 Use this compact order only after recording the user's explicit fast-mode request in `shot.json`:
+
+Before displaying the package, enter `review_pending` to record its artifact review ID. Use that ID and the subsequent actual user confirmation when approving. After a requested video-only edit, save the text and run `prepare-artifact-review` before displaying the revised package; retain the image and do not generate it again. IDs are internal bookkeeping, not user-facing technical questions.
 
 ```text
 镜头：<shot-id / title>
@@ -104,9 +103,11 @@ Use this compact order only after recording the user's explicit fast-mode reques
 | 2–3秒 | <4–8 characters> | <full state> |
 | 3–4秒 | <4–8 characters> | <final state> |
 
-QA：<pass / known minor issues / severe failure awaiting user decision>
+QA：<pass / pass_with_notes；如有轻微问题，写明备注>
 视频提示词：<complete prompt>
 ```
+
+严重 QA 问题不进入可批准的快速审核包；记录为失败并等待用户决定，不自动重做图片。
 
 ## Video prompt
 
@@ -114,13 +115,13 @@ In staged mode, write this only after the storyboard has been approved. In expli
 
 ```text
 生成一条 [画幅]、[分辨率]、[时长] 的产品视频，内容为 [一句话概括本镜头主体与动作]。
-镜头组织：[连续动作或剪辑序列；按已确认分镜选择。剪辑序列写明切点，连续动作说明可衔接的运动。]
+镜头组织：[连续动作或剪辑序列；按本镜头四宫格画面顺序选择。剪辑序列写明切点，连续动作说明可衔接的运动。]
 
-@Image1 是已确认的四宫格分镜图，用于动作、构图和节奏参考，不是精确首帧。按左上、右上、左下、右下理解四个连续阶段；忽略分隔线、标签、时间码和说明文字，不将它们拍入视频。
+@Image1 是本镜头对应的四宫格分镜图，用于动作、构图和节奏参考，不是精确首帧。按左上、右上、左下、右下理解四个阶段；忽略分隔线、标签、时间码和说明文字，不将它们拍入视频。
 @Image2：[原始参考图的单一或少量职责，例如产品身份、结构和数量。]
 [@Image3：其他原始参考图的职责；没有则删除。]
 
-场景与质感：[已确认的场景、光线、色彩、景深和材质要求。]
+场景与质感：[本镜头采用的场景、光线、色彩、景深和材质要求。]
 [时间段1]：[起始画面、主体位置、动作和机位。]
 [时间段2]：[动作推进、主体变化和运镜方向。]
 [时间段3]：[重点细节、动作或对焦变化。]
@@ -132,4 +133,4 @@ In staged mode, write this only after the storyboard has been approved. In expli
 声音：[已确认的音频规则]。
 ```
 
-Before presenting, remove all placeholders, reconcile the four beats and final state with the approved storyboard, and verify reference numbering against the actual uploaded images. Time ranges guide order and pacing; they do not promise frame-accurate alignment. If duration changes, recalculate all four ranges and keep the approved duration consistent in storyboard, labels, shot manifest, and video prompt.
+Before presenting, remove all placeholders, reconcile the four beats and final state with the matching storyboard (approved in staged mode, still pending package review in fast mode), and verify reference numbering against the actual uploaded images. Time ranges guide order and pacing; they do not promise frame-accurate alignment. If duration changes, recalculate all four ranges and keep the project duration consistent in storyboard, labels, shot manifest, and video prompt.

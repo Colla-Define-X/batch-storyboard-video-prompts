@@ -3,12 +3,25 @@ from __future__ import annotations
 
 import base64
 import contextlib
+from contextvars import ContextVar
 import functools
+import hashlib
 import json
 import os
 import tempfile
 import time
 from pathlib import Path
+
+
+_active_transaction = ContextVar('storyboard_transaction', default=None)
+
+
+def digest(content: bytes | None) -> str | None:
+    return hashlib.sha256(content).hexdigest() if content is not None else None
+
+
+def current_bytes(path: Path) -> bytes | None:
+    return path.read_bytes() if path.exists() else None
 
 
 def inside(root: Path, relative: str | Path) -> Path:
@@ -18,7 +31,7 @@ def inside(root: Path, relative: str | Path) -> Path:
     return path
 
 
-def atomic_bytes(path: Path, content: bytes) -> None:
+def _atomic_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
     temp = Path(name)
@@ -27,9 +40,33 @@ def atomic_bytes(path: Path, content: bytes) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        temp.replace(path)
+        # Windows scanners can briefly hold the journal between atomic writes.
+        for attempt in range(10):
+            try:
+                temp.replace(path)
+                break
+            except PermissionError as exc:
+                if os.name != 'nt' or getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 9:
+                    raise
+                time.sleep(.05)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def atomic_bytes(path: Path, content: bytes) -> None:
+    state = _active_transaction.get()
+    if state is not None:
+        path = inside(state['root'], path.resolve())
+        relative = str(path.relative_to(state['root']))
+        files = state['journal']['files']
+        if relative not in files:
+            before = current_bytes(path)
+            files[relative] = {'before': base64.b64encode(before).decode('ascii') if before is not None else None,
+                               'written_hashes': []}
+        files[relative]['written_hashes'].append(digest(content))
+        # Write-ahead logging covers only files this operation actually writes.
+        _atomic_bytes(state['path'], json.dumps(state['journal']).encode('utf-8'))
+    _atomic_bytes(path, content)
 
 
 @contextlib.contextmanager
@@ -67,25 +104,29 @@ def project_lock(root: Path):
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
 
-def controlled_paths(root: Path) -> list[Path]:
-    paths = [root/'project.json', root/'project.json.bak', root/'shared-brief.md']
-    for directory in (root/'shots').glob('*'):
-        if directory.is_dir():
-            paths.extend(directory/name for name in ('shot.json', 'shot.json.bak', 'state.json', 'storyboard-final.png', 'storyboard-final.json'))
-    return [inside(root, p.relative_to(root)) for p in paths]
-
-
 def recover(root: Path) -> None:
     journal = inside(root, '.workflow-transaction.json')
     if not journal.exists():
         return
     saved = json.loads(journal.read_text(encoding='utf-8'))
-    for relative, encoded in saved.items():
+    if saved.get('format') != 2:
+        raise RuntimeError('Legacy transaction journal needs manual recovery; preserve the journal and current files')
+    restore = []
+    for relative, record in saved['files'].items():
         path = inside(root, relative)
-        if encoded is None:
+        before = base64.b64decode(record['before'], validate=True) if record['before'] is not None else None
+        permitted = {digest(before), *record['written_hashes']}
+        if digest(current_bytes(path)) not in permitted:
+            raise RuntimeError(f'Recovery conflict at {relative}; preserve current files and journal for manual reconciliation')
+        restore.append((path, before, permitted))
+    # Check every target before restoring any of them. Repeated recovery is safe.
+    for path, before, permitted in restore:
+        if digest(current_bytes(path)) not in permitted:
+            raise RuntimeError(f'Recovery conflict at {path}; preserve current files and journal')
+        if before is None:
             path.unlink(missing_ok=True)
         else:
-            atomic_bytes(path, base64.b64decode(encoded, validate=True))
+            _atomic_bytes(path, before)
     journal.unlink()
 
 
@@ -100,20 +141,19 @@ def transaction(function):
                 if project.get('schema_version') != 4:
                     raise ValueError('Mutation requires schema v4; run migrate first')
             journal = inside(root, '.workflow-transaction.json')
-            saved = {str(p.relative_to(root)): base64.b64encode(p.read_bytes()).decode('ascii') if p.exists() else None
-                     for p in controlled_paths(root)}
-            if function.__name__ == 'add_source':
-                source = args[0] if args else kwargs['source']
-                asset_id = args[1] if len(args) > 1 else kwargs['asset_id']
-                target = inside(root, Path('sources') / f'{asset_id}{source.suffix.lower()}')
-                # Include newly stabilized media in crash rollback without copying unrelated media.
-                saved[str(target.relative_to(root))] = base64.b64encode(target.read_bytes()).decode('ascii') if target.exists() else None
-            atomic_bytes(journal, json.dumps(saved).encode('utf-8'))
+            saved = {'format': 2, 'files': {}}
+            _atomic_bytes(journal, json.dumps(saved).encode('utf-8'))
+            token = _active_transaction.set({'root': root, 'path': journal, 'journal': saved})
             try:
                 result = function(root, *args, **kwargs)
+                for relative, record in saved['files'].items():
+                    if digest(current_bytes(inside(root, relative))) != record['written_hashes'][-1]:
+                        raise RuntimeError(f'Concurrent write conflict at {relative}')
             except BaseException:
                 recover(root)
                 raise
+            finally:
+                _active_transaction.reset(token)
             journal.unlink()
             return result
     return call

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_workflow import workflow as w, prepare, record_image
+from test_workflow import workflow as w, prepare, record_image, approve_prompt, approve_artifact
 import project_io
 import storyboard_layout
 from PIL import Image
@@ -19,7 +19,9 @@ from PIL import Image
 
 def approve_worker(root, sid, event):
     event.wait(10)
-    w.approve(Path(root), sid, 'storyboard_prompt', 'Approved by user')
+    project = Path(root)
+    review_id = w.read_json(w.shot_json_path(project, sid))['prompt_review']['id']
+    w.approve(project, sid, 'storyboard_prompt', 'Approved by user', review_id, 'User confirmed current prompt')
 
 
 def crash_worker(root):
@@ -30,7 +32,8 @@ def crash_worker(root):
             os._exit(7)
         writer(path, data)
     with patch.object(w, 'write_json', side_effect=crash_before_summary):
-        w.approve(root, 'shot-01', 'storyboard_prompt', 'Approved')
+        review_id = w.read_json(w.shot_json_path(root, 'shot-01'))['prompt_review']['id']
+        w.approve(root, 'shot-01', 'storyboard_prompt', 'Approved', review_id, 'User confirmed current prompt')
 
 
 class RegressionTests(unittest.TestCase):
@@ -43,10 +46,11 @@ class RegressionTests(unittest.TestCase):
     def pending(self):
         prepare(self.root)
         w.set_status(self.root, 'shot-01', 'storyboard_prompt_pending', True)
+        w.prepare_prompt_review(self.root, 'shot-01')
 
     def generate(self):
         self.pending()
-        w.approve(self.root, 'shot-01', 'storyboard_prompt', 'Approved')
+        approve_prompt(self.root)
 
     def review(self):
         self.generate()
@@ -68,12 +72,13 @@ class RegressionTests(unittest.TestCase):
 
     def test_modified_prompt_blocks_generation_and_validation(self):
         self.generate()
-        (self.root/'shots/shot-01/storyboard-prompt.md').write_text('new product', encoding='utf-8')
+        prompt_path = self.root/'shots/shot-01/storyboard-prompt.md'
+        prompt_path.write_text(prompt_path.read_text(encoding='utf-8') + '\nnew product', encoding='utf-8')
         for fn in (lambda: w.preflight(self.root,'shot-01'), lambda: w.validate(self.root)):
             with self.assertRaisesRegex(ValueError, 'stale'):
                 fn()
         w.revise(self.root,'shot-01','storyboard_prompt','User changed product')
-        w.approve(self.root,'shot-01','storyboard_prompt','Approved revised version')
+        approve_prompt(self.root)
         w.preflight(self.root,'shot-01')
 
     def test_one_generation_per_authorization(self):
@@ -115,15 +120,21 @@ class RegressionTests(unittest.TestCase):
         w.retry_shot(self.root,'shot-01','storyboard_generating','Retry image')
 
     def test_storyboard_only_completes_and_freezes(self):
+        project = w.read_json(self.root/'project.json')
+        project['delivery_scope'] = 'storyboard_only'
+        w.write_json(self.root/'project.json', project)
         self.review()
-        w.approve(self.root,'shot-01','storyboard','Approved')
+        approve_artifact(self.root,'shot-01','storyboard','Approved')
         self.assertEqual(w.read_json(w.shot_json_path(self.root,'shot-01'))['status'],'complete')
         self.assertTrue((self.root/'shots/shot-01/storyboard-final.png').exists())
         w.validate(self.root)
 
     def test_changed_image_invalidates_completion(self):
+        project = w.read_json(self.root/'project.json')
+        project['delivery_scope'] = 'storyboard_only'
+        w.write_json(self.root/'project.json', project)
         self.review()
-        w.approve(self.root,'shot-01','storyboard','Approved')
+        approve_artifact(self.root,'shot-01','storyboard','Approved')
         Image.new('RGB',(90,160),'red').save(self.root/'shots/shot-01/storyboard-review-v01.png')
         with self.assertRaisesRegex(ValueError,'stale'):
             w.validate(self.root)
@@ -141,12 +152,12 @@ class RegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Single storyboard'):
                 fn()
 
-    def test_cli_defaults_to_one_storyboard_only(self):
+    def test_cli_defaults_to_one_combined_delivery(self):
         root=Path(self.temp.name)/'cli'
         subprocess.run([sys.executable,str(Path(w.__file__)),'init',str(root),'--name','demo'],check=True,capture_output=True)
         data=w.read_json(root/'project.json')
         self.assertEqual(len(data['shots']),1)
-        self.assertEqual(data['delivery_scope'],'storyboard_only')
+        self.assertEqual(data['delivery_scope'],'storyboard_and_video_prompt')
         self.assertEqual(data['workflow']['execution_model'],'current_conversation')
 
     def test_fast_switch_while_prompt_pending(self):
@@ -154,8 +165,9 @@ class RegressionTests(unittest.TestCase):
         w.set_review_mode(self.root,'shot-01','fast','User explicitly requests fast mode')
         w.set_status(self.root,'shot-01','running',True)
         record_image(self.root)
+        (self.root/'shots/shot-01/video-prompt.md').write_text('Matching video prompt', encoding='utf-8')
         w.set_status(self.root,'shot-01','review_pending',True)
-        w.approve(self.root,'shot-01','review_package','Approved')
+        approve_artifact(self.root,'shot-01','review_package','Approved')
         w.validate(self.root)
 
     def test_custom_times_allowed_and_invalid_times_rejected(self):
@@ -181,7 +193,7 @@ class RegressionTests(unittest.TestCase):
                 raise OSError('simulated failure')
             writer(path,data)
         with patch.object(w,'write_json',side_effect=fail_project), self.assertRaises(OSError):
-            w.approve(self.root,'shot-01','storyboard','Approved')
+            approve_artifact(self.root,'shot-01','storyboard','Approved')
         self.assertEqual(path.read_bytes(),original)
         self.assertFalse((path.parent/'storyboard-final.png').exists())
 
@@ -211,6 +223,10 @@ class RegressionTests(unittest.TestCase):
         for sid in ('shot-01','shot-02'):
             prepare(root,sid)
             w.set_status(root,sid,'storyboard_prompt_pending',True)
+        w.set_concurrency(root,'all')
+        for sid in ('shot-01','shot-02'):
+            w.register_task(root,sid,f'child-{sid}',None)
+            w.prepare_prompt_review(root,sid)
         ctx=multiprocessing.get_context('spawn')
         event=ctx.Event()
         workers=[ctx.Process(target=approve_worker,args=(str(root),sid,event)) for sid in ('shot-01','shot-02')]
@@ -265,10 +281,11 @@ class RegressionTests(unittest.TestCase):
         video=self.root/'shots/shot-01/video-prompt.md'
         video.write_text('First draft',encoding='utf-8')
         w.set_status(self.root,'shot-01','review_pending',True)
-        w.approve(self.root,'shot-01','review_package','Approved')
+        approve_artifact(self.root,'shot-01','review_package','Approved')
         w.revise(self.root,'shot-01','video_prompt','User requested new copy')
         video.write_text('Second draft',encoding='utf-8')
-        w.approve(self.root,'shot-01','review_package','Approved revised package')
+        w.prepare_artifact_review(self.root,'shot-01')
+        approve_artifact(self.root,'shot-01','review_package','Approved revised package')
         w.validate(self.root)
         self.assertEqual(w.read_json(w.shot_json_path(self.root,'shot-01'))['storyboard_version'],1)
 
@@ -283,11 +300,11 @@ class RegressionTests(unittest.TestCase):
         project['delivery_scope']='storyboard_and_video_prompt'
         w.write_json(self.root/'project.json',project)
         self.review()
-        w.approve(self.root,'shot-01','storyboard','Approved')
+        approve_artifact(self.root,'shot-01','storyboard','Approved')
         video=self.root/'shots/shot-01/video-prompt.md'
         video.write_text('Approved video',encoding='utf-8')
         w.set_status(self.root,'shot-01','video_prompt_review_pending',True)
-        w.approve(self.root,'shot-01','video_prompt','Approved')
+        approve_artifact(self.root,'shot-01','video_prompt','Approved')
         video.write_text('Different video',encoding='utf-8')
         with self.assertRaisesRegex(ValueError,'stale'):
             w.validate(self.root)
