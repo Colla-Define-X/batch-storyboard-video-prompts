@@ -29,6 +29,7 @@ REQUIRED_PATHS = (
     "scripts/check_release.py",
     "scripts/workflow.py",
     "scripts/project_io.py",
+    "scripts/chat_membership.py",
     "references/execution.md",
 )
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")

@@ -31,19 +31,29 @@ The new-model handoff gives the child the existing prompt, then the coordinator 
 
 An independent shot conversation is a separate chat, not a separate Codex project. Apply this rule to every authorized new shot conversation: first all/pilot launch, later batches, replacements and legacy projects without the handoff marker. It does not authorize extra conversations or change the single/fast routes.
 
-Before `create_thread`, resolve the coordinator's current app membership. Use its runtime-provided thread identity (for example `CODEX_THREAD_ID`, when available) and host to match the exact record in `list_threads`, including pinned threads. If absent from a limited result, broaden the read-only lookup; do not choose a similarly named or recently active chat. Do not infer membership from the working directory, output directory, storyboard `project.json`, or sidebar section. A missing record/field is unknown, not an explicit `projectId: null`.
+Before `create_thread`, resolve the coordinator's current app membership using its runtime-provided thread identity (for example `CODEX_THREAD_ID`) and host. Never choose by title, recency, working/output directory, storyboard `project.json`, or sidebar section. `list_threads` can omit new chats and can return `projectId: null` for a chat with an explicit desktop project assignment. A null value alone therefore does NOT establish projectless membership.
+
+For the local desktop, run the read-only adapter for the exact coordinator ID before creation, and for each real child ID after creation:
+
+```bash
+python scripts/chat_membership.py --thread-id <exact-thread-id> --host-id local
+```
+
+It reads only explicit assignment/projectless entries in `$CODEX_HOME/.codex-global-state.json` (default `~/.codex`), outputs only the requested chat's result, and never modifies app state. This is a desktop compatibility adapter, not a stable public API. Unsupported/missing/conflicting state returns `unknown` with exit code 2; never treat failure as projectless. It supports local desktop state only, not remote/cloud membership. Do not copy or edit the desktop state, use backup files, or infer membership from workspace hints. For `project`, verify its returned ID against current `list_projects` on the same host before using it.
+
+Also consult the exact `list_threads` record (including pinned threads, at most `limit: 50`). A non-null project matching `list_projects` can resolve membership when the adapter is unavailable. A missing record or null list value does not override an explicit desktop assignment. A different non-null project, or non-null project versus explicit desktop projectless, is a real conflict: reread once and stop if unresolved. If neither source resolves membership, ask one short question rather than guessing. A user's explicit destination also resolves the creation target after checking `list_projects`; it is not permission to rewrite the parent's membership.
 
 | Verified coordinator membership | Default `create_thread.target` |
 | --- | --- |
 | A non-null Codex `projectId`, verified against `list_projects` on the matching host | `{"type":"project","projectId":"<verified-project-id>","environment":{"type":"local"}}` |
-| The exact app record explicitly has `projectId: null` | `{"type":"projectless"}` |
+| Explicit desktop projectless entry, or the user's explicit projectless destination | `{"type":"projectless"}` |
 | Unknown, conflicting, or an unavailable project | Do not create; finish read-only checks, then ask one short question if still unresolved. Do not fall back to projectless or another project. |
 
 Unless the user explicitly chooses a different destination, keep the same project ID or projectless state. Resolve an explicitly chosen project through `list_projects` too. Default to the saved project's local environment; do not create a worktree or switch to cloud work without an explicit request. Keep absolute source/output paths in the task brief unchanged: those paths do not determine app membership, and projectless chats need not share the same working directory.
 
-After creation returns a real `threadId` and available `hostId`, read the exact child's app record and check its `projectId` against the intended destination (including explicit null for projectless) before `register-task` and identity handoff. A pending `clientThreadId` is not enough. If the record is not yet visible, make a bounded read-only recheck. If membership remains unknown or differs, report the created chat and stop its handoff; do not register it, automatically repeat creation, move/rebuild/archive it, or claim that a correct output path proves success. An ambiguous creation result likewise does not authorize another creation attempt. Existing chats are not automatically relocated by this rule.
+After creation returns a real `threadId` and available `hostId`, use the same adapter/source rules to compare the child's membership with the verified target before `register-task` and identity handoff. A missing list entry does not block a child whose explicit desktop assignment matches. A pending `clientThreadId` is not enough. If both sources are unavailable, recheck once; still unknown or explicitly different means report the exact chat and stop its handoff. Do not automatically repeat creation, move/rebuild/archive it, or claim that an output path proves membership. Preserve the actual creation target and returned IDs in the handoff note for recovery; never reconstruct the target from the intended plan. A success receipt proves creation, not independently verified membership. Previously paused chats created with the wrong target must not be released under this fix; any relocation/replacement needs the user's authorization.
 
-This is a creation-time check, not ongoing coordinator monitoring or a new user approval. App membership remains sourced from the app; the local workflow CLI does not validate it, and no duplicate membership field is added to `project.json`.
+This is a creation-time check, not ongoing coordinator monitoring or a new user approval. App membership remains sourced from app tools and explicit desktop records; the workflow state machine is unchanged, and no duplicate membership field is added to `project.json`.
 
 ## Shot task in the new handoff
 
