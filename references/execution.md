@@ -1,6 +1,6 @@
 # 执行指南
 
-这里的命令示例中 `PROJECT` 表示实际项目目录。内容在各自的草稿文件中编写，再用下述带锁命令保存；不要直接覆盖项目的 JSON、共享 brief 或提示词。状态、审核记录和版本只能由工作流命令管理。
+这里的命令示例中 `PROJECT` 表示实际分镜文件目录，不是 Codex 对话所属项目的 ID。内容在各自的草稿文件中编写，再用下述带锁命令保存；不要直接覆盖项目的 JSON、共享 brief 或提示词。状态、审核记录和版本只能由工作流命令管理。
 
 ## 安全保存内容
 
@@ -200,6 +200,8 @@ python scripts/workflow.py revise-designs PROJECT shot-01 shot-02 --reason "用�
 审核记录绑定输入、图片版本和哈希。修改后命令会报告stale，必须修订/重新批准，不通过直接改JSON绕过。普通status不允许退回重生成。
 
 ## 并发、恢复与旧项目
+
+凡实际新建镜头对话，默认继承主对话当前实际 Codex 项目归属；明确无项目则同样无项目。创建前核实归属、创建后按真实对话 ID 核对成功，才登记任务和交接身份，具体工具参数见 [项目继承与创建核对](hybrid-coordination.md#project-membership-when-creating-conversations)。此规则覆盖全部开始、试做、后续批次、经授权的替代对话和无标记旧项目，不改变单张/快速模式不创建子对话的默认路径。归属未知或项目不可用时不擅自选其他项目；不得用文件目录或侧边栏分组代替归属核对，也不自动迁移已有对话。本地 CLI 不负责查询或校验 Codex 项目归属。
 
 单张禁止 `set-concurrency` 和 `register-task`。多张分阶段制作按 [hybrid-coordination.md](hybrid-coordination.md) 创建独立镜头对话并行推进；暂不使用单对话管理多张图各自的分阶段审核。多张快速请求使用上文的当前对话集中路径。新项目的 `workflow.handoff_model: prepared_prompt_to_shot` 仅在多张分阶段镜头上启用：总控初版准备完成后首次 `set-concurrency`，此时设置 `video_prompt_owner: shot_task`；无标记旧项目的并发选择保留 `video_prompt_owner: coordinator` 和原提示词分工。这里的 owner 是工作流分工说明，不是新增权限系统。分阶段并发时，每个镜头有一个内容维护者，公共设置由总控对话管理。状态与批准命令通过项目锁更新镜头和项目摘要。
 

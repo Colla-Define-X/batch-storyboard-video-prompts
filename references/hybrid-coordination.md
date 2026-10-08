@@ -25,11 +25,29 @@ When the user asks for overall progress, read `workflow.py dashboard <project>` 
 
 Before showing each creative design, run `prepare-design-review`; after the user's reply, record `approve-design` with its current ID and actual confirmation. A saved confirmation sentence alone is not authorization. Then complete every initial prompt and matching shot fields. The coordinator actually compares prompt, confirmed design, and cross-shot opening/action/ending, recording a concrete `check-prompt-plan --note ...` for every shot **before** asking about concurrency. See [execution.md](execution.md). Do not create a child merely to draft or return a prompt.
 
-The new-model handoff gives the child the existing prompt, then the coordinator registers its real thread/host identity and tells that child its own identity. The child waits for this registration **before** running `prepare-prompt-review` or showing its first prompt review. It then submits the saved prompt, waits for the user's current-version confirmation, records `approve ... storyboard_prompt`, and runs preflight with its own identity when generation is authorized and unclaimed. The same shot conversation generates, locally labels and visually checks the image, presents it for approval, writes and reviews any matching video prompt, and delivers its result. Saving local files does not wake an idle conversation: when a continuation is needed, use the existing authorized coordination mechanism and have the task reread current state. Duplicate notifications never authorize another generation.
+The new-model handoff gives the child the existing prompt, then the coordinator verifies its project membership, registers its real thread/host identity and tells that child its own identity. The child waits for this registration **before** running `prepare-prompt-review` or showing its first prompt review. It then submits the saved prompt, waits for the user's current-version confirmation, records `approve ... storyboard_prompt`, and runs preflight with its own identity when generation is authorized and unclaimed. The same shot conversation generates, locally labels and visually checks the image, presents it for approval, writes and reviews any matching video prompt, and delivers its result. Saving local files does not wake an idle conversation: when a continuation is needed, use the existing authorized coordination mechanism and have the task reread current state. Duplicate notifications never authorize another generation.
+
+## Project membership when creating conversations
+
+An independent shot conversation is a separate chat, not a separate Codex project. Apply this rule to every authorized new shot conversation: first all/pilot launch, later batches, replacements and legacy projects without the handoff marker. It does not authorize extra conversations or change the single/fast routes.
+
+Before `create_thread`, resolve the coordinator's current app membership. Use its runtime-provided thread identity (for example `CODEX_THREAD_ID`, when available) and host to match the exact record in `list_threads`, including pinned threads. If absent from a limited result, broaden the read-only lookup; do not choose a similarly named or recently active chat. Do not infer membership from the working directory, output directory, storyboard `project.json`, or sidebar section. A missing record/field is unknown, not an explicit `projectId: null`.
+
+| Verified coordinator membership | Default `create_thread.target` |
+| --- | --- |
+| A non-null Codex `projectId`, verified against `list_projects` on the matching host | `{"type":"project","projectId":"<verified-project-id>","environment":{"type":"local"}}` |
+| The exact app record explicitly has `projectId: null` | `{"type":"projectless"}` |
+| Unknown, conflicting, or an unavailable project | Do not create; finish read-only checks, then ask one short question if still unresolved. Do not fall back to projectless or another project. |
+
+Unless the user explicitly chooses a different destination, keep the same project ID or projectless state. Resolve an explicitly chosen project through `list_projects` too. Default to the saved project's local environment; do not create a worktree or switch to cloud work without an explicit request. Keep absolute source/output paths in the task brief unchanged: those paths do not determine app membership, and projectless chats need not share the same working directory.
+
+After creation returns a real `threadId` and available `hostId`, read the exact child's app record and check its `projectId` against the intended destination (including explicit null for projectless) before `register-task` and identity handoff. A pending `clientThreadId` is not enough. If the record is not yet visible, make a bounded read-only recheck. If membership remains unknown or differs, report the created chat and stop its handoff; do not register it, automatically repeat creation, move/rebuild/archive it, or claim that a correct output path proves success. An ambiguous creation result likewise does not authorize another creation attempt. Existing chats are not automatically relocated by this rule.
+
+This is a creation-time check, not ongoing coordinator monitoring or a new user approval. App membership remains sourced from the app; the local workflow CLI does not validate it, and no duplicate membership field is added to `project.json`.
 
 ## Shot task in the new handoff
 
-Before creating a shot task, run:
+After the existing preparation and launch-choice requirements are satisfied, resolve the creation destination as above and prepare the initial brief before creating a shot task:
 
 ```bash
 python scripts/workflow.py task-brief <project> <shot-id>
@@ -74,7 +92,7 @@ Registering a task activates a slot:
 python scripts/workflow.py register-task <project> shot-01 <thread-id> --host-id <host-id>
 ```
 
-The initial brief and complete prompt are prepared before the new task ID exists. After creation returns a real `threadId` and its `hostId` when available, register them, then pass that identity to the assigned task through the authorized coordination workflow. A pending `clientThreadId` is not a usable thread ID. The task waits for its own identity and the current prompt approval before preflight. Never infer caller identity by copying the current owner from `project.json`; a replaced task must retain its own old identity. If no host was supplied at registration, omit `--host-id` at preflight too; otherwise pass the exact registered host. These are internal handoff details, not new user questions.
+The initial brief and complete prompt are prepared before the new task ID exists. After creation returns a real `threadId` and its `hostId` when available, complete the project-membership check above, register them, then pass that identity to the assigned task through the authorized coordination workflow. A pending `clientThreadId` is not a usable thread ID. The task waits for its own identity and the current prompt approval before preflight. Never infer caller identity by copying the current owner from `project.json`; a replaced task must retain its own old identity. If no host was supplied at registration, omit `--host-id` at preflight too; otherwise pass the exact registered host. These are internal handoff details, not new user questions.
 
 A registration beyond the user-selected limit is rejected. If the old task has already started a generation, wait for its actual result or failure to be recorded before handing off; replacing the task does not cancel that call or grant a retry. Do not assign a different task to a shot that still has an active task: stop the old task first, then release its slot before registering the replacement. `release-task` updates the project record; it does not stop an external task by itself. A slot is released when the storyboard is approved, when manually released, or when the requested scope completes. Image-only approval completes the shot; combined delivery continues in the **same** shot conversation for video prompt and final delivery, retaining its thread/host identity but not occupying an active slot. To release a slot manually:
 
@@ -92,7 +110,7 @@ Preflight checks launch permission and matches the supplied caller identity to t
 
 Archiving a completed visible task is an optional UI action and requires the user's authorization when it has not already been requested.
 
-When sidebar organization tools are available and the user explicitly requests organization, create one project-named section, pin or place the coordinator first, place the user-selected active shot tasks below it, and offer to archive completed shot tasks. Do not change sidebar organization or archive tasks without that request.
+When sidebar organization tools are available and the user explicitly requests organization, create one project-named section, pin or place the coordinator first, place the user-selected active shot tasks below it, and offer to archive completed shot tasks. A sidebar section is only organization, not Codex project membership, and cannot substitute for the creation-time check above. Do not change sidebar organization or archive tasks without that request.
 
 ## Existing projects without the handoff marker
 
