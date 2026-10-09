@@ -1,31 +1,31 @@
 # Hybrid coordinator and shot-task workflow
 
-Use this reference for staged requests for two or more storyboard images. The coordinator and separate shot conversations are the staged multi-image route. New projects marked `workflow.handoff_model: prepared_prompt_to_shot` use the prepared-prompt handoff below. An existing project without this marker, even if concurrency has not yet been chosen, keeps the legacy coordinator-led prompt approval and video-prompt workflow described at the end; do not infer the new model from shot count or silently add the marker. Explicit fast-mode or direct-generation requests instead stay in the current conversation; follow [execution.md](execution.md). If the user gives no quantity, default to one storyboard image. For a single image, keep prompt confirmation and all later review in the current conversation; skip coordinator/shot-task design and concurrency selection.
+Use this reference for staged requests for two or more storyboard images. New projects marked `workflow.handoff_model: creative_plan_to_shot` use the creative-plan handoff below. Existing `prepared_prompt_to_shot` projects retain prepared initial prompts and an explicit all/pilot choice; unmarked projects retain coordinator-led prompt approval and video prompts, as described under compatibility below. Never infer or change a model from shot count, task absence or launch choice. Explicit fast requests stay in the current conversation; follow [execution.md](execution.md). Omitted quantity means one storyboard; keep a single image and all its reviews in the current conversation without task creation or concurrency selection.
 
-Use one coordinator conversation plus a user-selected set of active shot conversations. Do not impose a two-task default.
+Use one coordinator plus all approved staged shot conversations by default for the new model. An explicitly requested pilot limits that launch; it is not the default and not a rolling queue.
 
 This follows [OpenAI's long-running work guidance](https://learn.chatgpt.com/docs/long-running-work): keep related work in one chat for shared context and use separate chats only when tasks can run independently.
 
-## New prepared-prompt handoff: coordinator ownership
+## New creative-plan handoff: coordinator ownership
 
 For a new marked multi-shot staged project, the coordinator owns:
 
 - `shared-brief.md` and global visual rules;
-- initial `content-plan.json`: the story/showcase decision, verified use contexts and selling points, four short beats and shot scales per image, and cross-shot diversity;
+- initial `content-plan.json`: the story/showcase decision, verified contexts and selling points, complete six-column panel content and scales, plus cross-shot diversity;
 - `project.json`, stabilized sources, task registration, and the dashboard;
-- writing every shot's initial complete `storyboard-prompt.md` and matching `shot.json` content after creative confirmation; checking each against its confirmed design and the whole batch with `check-prompt-plan`;
-- only after all initial prompts and checks are ready, asking whether to start every shot or pilot one or two shots first, then recording that choice and creating shot conversations;
+- saving each shot's reference IDs and roles, the completed shared brief and approved creative plan before handoff; technical prompts and full production panel data are not initial handoff prerequisites;
+- presenting the batch with [creative-review-template.md](creative-review-template.md), then recording all current creative approvals and the default all launch (or the user's explicit pilot) before creating conversations;
 - maintaining global settings, source assets and cross-shot coordination when a change genuinely affects more than one shot.
 
-The coordinator does not routinely submit a shot's prompt review, approve its image, write its video prompt, or aggregate its delivery. Each new-model shot conversation owns those local steps through completion. `video_prompt_owner: shot_task` records this ownership after concurrency is chosen; it is not a new user checkpoint or a permission system.
+The coordinator does not write the new model's initial technical prompts, routinely submit local prompt reviews, approve images, write video prompts, or aggregate delivery. Each shot conversation owns these steps through completion. Both marked handoffs set `video_prompt_owner: shot_task` on launch; this describes ownership, not a new checkpoint or permission system.
 
-Plan the whole batch internally before showing one image at a time to the user. If the relationship is unclear, ask whether the images form one continuous video or independent options. For a continuous video, give one short overall progression first. Confirm each image's context, main selling point, and four one-sentence beats; if earlier feedback changes a later image, revise the unconfirmed images. After all are confirmed, compare opening, action and ending motifs across the batch. Show only necessary local changes for renewed confirmation. Use `approval_source: explicit_fast_request` only for an explicit fast request; plain “生成” remains staged. Keep the content plan's confirmation text grounded in the user's actual reply.
+Plan the whole batch before presentation. Resolve whether it forms one continuous video or independent options; show overall progression when applicable. Use the template's batch overview and per-image six-column tables, then seek one explicit batch approval rather than one compulsory reply per image. Save every column in the existing approved beat text and scales; see [schema.md](schema.md). Before presentation, review panel purpose, within-grid progression and semantic cross-shot duplication of openings, actions, endings and evidence. Do not mistake different wording/angles for new content or stable product/lighting identity for unwanted repetition. A local requested change affects only the relevant designs; explain any cross-shot impact before revising others. Plain “生成” stays staged; explicit fast requests use their own internal authorization without these visible checkpoints.
 
 When the user asks for overall progress, read `workflow.py dashboard <project>` on demand. Do not turn it into routine coordinator status collection, per-shot approval relay or final delivery aggregation. Shots do not need to remain synchronized.
 
-Before showing each creative design, run `prepare-design-review`; after the user's reply, record `approve-design` with its current ID and actual confirmation. A saved confirmation sentence alone is not authorization. Then complete every initial prompt and matching shot fields. The coordinator actually compares prompt, confirmed design, and cross-shot opening/action/ending, recording a concrete `check-prompt-plan --note ...` for every shot **before** asking about concurrency. See [execution.md](execution.md). Do not create a child merely to draft or return a prompt.
+Before showing the batch, prepare each unapproved current design with `prepare-design-review` (reuse a still-valid submission on resume). After a scope-clear batch reply, record `approve-design` for every included current ID using that actual reply. Do not treat partial approval as batch approval or silently attach it to changed content. Keep unaffected valid approvals; the ordinary batch launch waits until the whole required plan is approved. A saved confirmation sentence is not authorization. Record `set-concurrency ... all` without an additional all/pilot question, or the explicitly requested pilot. These are internal commands, not extra user checkpoints. See [execution.md](execution.md).
 
-The new-model handoff gives the child the existing prompt, then the coordinator verifies its project membership, registers its real thread/host identity and tells that child its own identity. The child waits for this registration **before** running `prepare-prompt-review` or showing its first prompt review. It then submits the saved prompt, waits for the user's current-version confirmation, records `approve ... storyboard_prompt`, and runs preflight with its own identity when generation is authorized and unclaimed. The same shot conversation generates, locally labels and visually checks the image, presents it for approval, writes and reviews any matching video prompt, and delivers its result. Saving local files does not wake an idle conversation: when a continuation is needed, use the existing authorized coordination mechanism and have the task reread current state. Duplicate notifications never authorize another generation.
+The handoff gives each child the whole batch context, its complete approved design, reference assignments and shared brief. The coordinator verifies project membership, registers the real thread/host and passes that identity. The child waits for registration before initial prompt review; then writes its full prompt and shot content, checks alignment and global repetition with `check-prompt-plan`, and uses [storyboard-prompt-review-template.md](storyboard-prompt-review-template.md) for the local review. It records current-version prompt approval before preflight with its own identity. Creating all children does not authorize images before their individual prompt approvals. The same child handles generation, labels, QA, image approval, matching video prompt and delivery. Saving files does not wake an idle conversation; use authorized coordination when needed and reread current state. Duplicate notifications never authorize another generation.
 
 ## Project membership when creating conversations
 
@@ -55,29 +55,30 @@ After creation returns a real `threadId` and available `hostId`, use the same ad
 
 This is a creation-time check, not ongoing coordinator monitoring or a new user approval. App membership remains sourced from app tools and explicit desktop records; the workflow state machine is unchanged, and no duplicate membership field is added to `project.json`.
 
-## Shot task in the new handoff
+## Shot task in the creative-plan handoff
 
-After the existing preparation and launch-choice requirements are satisfied, resolve the creation destination as above and prepare the initial brief before creating a shot task:
+After the full creative plan is approved, the shared brief and assigned sources are ready, and all/pilot launch is recorded, resolve the destination above and prepare the initial brief before creating a task:
 
 ```bash
 python scripts/workflow.py task-brief <project> <shot-id>
 ```
 
-Use that output as the shot task's initial brief. For the new handoff it points to already-prepared materials:
+Use that output as the initial brief. It points to the approved inputs and local files:
 
 - `shared-brief.md` for global rules;
 - `content-plan.json` for this shot's confirmed creative assignment and the batch context;
 - the matching `shots/<shot-id>/shot.json` for local state;
-- `project.json` for common settings.
-- this shot's complete `storyboard-prompt.md` and populated local shot content.
+- `project.json` for common settings;
+- this shot's `storyboard-prompt.md` as the output to prepare, not a required existing input;
+- the child presentation template and technical prompt reference linked by the task brief.
 
-The new-model shot task first reads and preserves its assigned complete prompt; do not rewrite it on receipt. Once its real task identity has been registered and handed to it, it runs `prepare-prompt-review`, shows the concise plan and links that saved prompt in its own conversation, waits for the user's confirmation, and records approval there. A still-valid review resumed after interruption is shown/waited on, not recreated. Thereafter it owns its own prompt revisions, image generation, local labels, QA, image review, video prompt (if in scope), and delivery. Save changes via `content-revision` / `save-content --expected-hash`; never overwrite shared targets directly. It must not edit another shot or `project.json`. A user-requested creative revision confined to this shot may update **only its own entry** of `content-plan.json` after `revise ... storyboard_prompt`, using a fresh whole-file read, merge and compare-and-save; then renew this shot's design confirmation, prompt-plan check and prompt review locally. Do not alter global plan fields or other entries; refer genuine global or cross-shot changes for explicit coordination. Workflow commands lock and update manifests with recovery. Do not retry automatically.
+The child reads the whole plan, not just an isolated shot summary. After identity handoff, it writes its initial technical prompt and corresponding shot content from the complete approved panel text and scales, checks the actual prompt and batch context, enters `storyboard_prompt_pending`, and runs `prepare-prompt-review`. Render its bound content using the six-column child template, link the saved full prompt and wait for confirmation. Do not omit person actions or invent missing design choices. Existing valid prompts/reviews are preserved on resume, not redrafted merely because a child starts. The child owns all local revisions, images, labels, QA, image/video reviews and delivery. Save through `content-revision` / `save-content --expected-hash`; do not directly overwrite shared files or edit another shot / `project.json`. A user-requested local creative revision may update only its own plan entry after `revise ... storyboard_prompt`, using fresh whole-file read/merge/CAS; renew affected design approval, plan check and prompt review locally. Recheck global duplication but coordinate before changing other entries or global fields. Do not retry generation automatically.
 
-## Choose concurrency after initial prompt preparation
+## Record the launch after creative approval
 
-After the shared brief, complete content plan, every staged creative design confirmation, every complete initial prompt and its shot content, and every initial `check-prompt-plan` are ready, ask one concise question: “要直接同时开始全部镜头，还是先做 1–2 个镜头确认效果？” Do not create any shot task until the user answers. This new-model choice records `video_prompt_owner: shot_task`; shot tasks receive prompts rather than writing their first versions.
+For `creative_plan_to_shot`, the creative presentation explains that approval will create all staged children but not generate images. After the whole current design is approved and actual shared/reference material is ready, record `all` without asking a second question. If the user explicitly requests one or two pilot shots, record that instead and respect its selected scope. Full technical prompts and `check-prompt-plan` are required later before local prompt approval, not before child creation. This launch sets `video_prompt_owner: shot_task`.
 
-Record “全部开始” with:
+Record the new model's default all launch (or an explicit all choice in older models) with:
 
 ```bash
 python scripts/workflow.py set-concurrency <project> all
@@ -90,9 +91,9 @@ python scripts/workflow.py set-concurrency <project> pilot --count 1
 python scripts/workflow.py set-concurrency <project> pilot --count 2
 ```
 
-The script rejects task registration while this choice is unset. `all` permits every project shot to start; `pilot` permits only the selected one or two shots. A pilot is not a permanent project-wide ceiling: after the user reviews the effect, ask how they want to continue and update the choice after releasing active tasks.
+The script rejects registration while the launch is unset; record the approved scope rather than treating that error as a new all/pilot question in the creative model. `all` permits every staged shot; `pilot` permits only the selected one or two. Creating a task is not prompt approval. After a pilot, ask how the user wants to continue and record that choice after releasing active tasks; do not silently expand the cohort.
 
-Pilot registration records the first 1–2 distinct shot IDs for that round. Releasing or approving a pilot shot does not permit a new ID. In the same round, the same shot may return for a user-requested new image; once a later pilot round selects different shots, an old-round shot cannot bypass that current scope. After the user's explicit continuation decision, use `set-concurrency ... all --reason "actual decision"` or a new `pilot --count ... --reason ...`. Never reset the cohort on your own. A child with a current prompt-review record waits for confirmation; one with a valid handed-off prompt but no review submits it rather than rewriting it.
+Pilot registration records the first 1–2 distinct shot IDs for that round. Releasing or approving one does not permit a new ID. The same shot may return for a user-requested new image in that round; an old-round shot cannot bypass a later pilot's scope. After explicit continuation, use `set-concurrency ... all --reason "actual decision"` or another requested pilot. Never reset the cohort on your own. A child with a current prompt review waits; one with valid complete content but no review submits it without rewriting; one in the new creative model without a prompt writes it from the approved design.
 
 In a mixed-mode batch, these slots serve only staged shots; fast shots stay in the coordinator conversation and cannot register tasks. Release an active slot before switching its shot to fast. An unfinished revision to another shot does not block an already approved assignment, but global content-type/relationship changes require affected approvals to be renewed.
 
@@ -102,7 +103,7 @@ Registering a task activates a slot:
 python scripts/workflow.py register-task <project> shot-01 <thread-id> --host-id <host-id>
 ```
 
-The initial brief and complete prompt are prepared before the new task ID exists. After creation returns a real `threadId` and its `hostId` when available, complete the project-membership check above, register them, then pass that identity to the assigned task through the authorized coordination workflow. A pending `clientThreadId` is not a usable thread ID. The task waits for its own identity and the current prompt approval before preflight. Never infer caller identity by copying the current owner from `project.json`; a replaced task must retain its own old identity. If no host was supplied at registration, omit `--host-id` at preflight too; otherwise pass the exact registered host. These are internal handoff details, not new user questions.
+The initial task brief and creative materials exist before the new task ID; only the older prepared model also requires a full prompt at that point. After a real `threadId` and available `hostId` return, verify project membership, register them, then pass that identity through authorized coordination. A pending `clientThreadId` is insufficient. Wait for identity and current prompt approval before preflight. Never copy the current owner from `project.json` as caller identity; a replaced task retains its own identity. Omit host at preflight only if registration omitted it. These internal details add no user questions.
 
 A registration beyond the user-selected limit is rejected. If the old task has already started a generation, wait for its actual result or failure to be recorded before handing off; replacing the task does not cancel that call or grant a retry. Do not assign a different task to a shot that still has an active task: stop the old task first, then release its slot before registering the replacement. `release-task` updates the project record; it does not stop an external task by itself. A slot is released when the storyboard is approved, when manually released, or when the requested scope completes. Image-only approval completes the shot; combined delivery continues in the **same** shot conversation for video prompt and final delivery, retaining its thread/host identity but not occupying an active slot. To release a slot manually:
 
@@ -121,6 +122,10 @@ Preflight checks launch permission and matches the supplied caller identity to t
 Archiving a completed visible task is an optional UI action and requires the user's authorization when it has not already been requested.
 
 When sidebar organization tools are available and the user explicitly requests organization, create one project-named section, pin or place the coordinator first, place the user-selected active shot tasks below it, and offer to archive completed shot tasks. A sidebar section is only organization, not Codex project membership, and cannot substitute for the creation-time check above. Do not change sidebar organization or archive tasks without that request.
+
+## Existing prepared-prompt projects
+
+Existing `prepared_prompt_to_shot` projects keep their original handoff, even before their first child or launch. The coordinator confirms designs with the established cadence, prepares every initial complete prompt and matching shot content, records each `check-prompt-plan`, then asks all-versus-pilot and records the user's choice. First launch, task brief and registration still require prepared current inputs in `storyboard_prompt_pending`. Children preserve those drafts, wait for real identity registration, review them locally and retain all later image/video work. Local creative revisions remain child-owned. Do not backfill the new marker, require six-column rewrites of valid older designs, or invalidate approvals just to adopt a new format.
 
 ## Existing projects without the handoff marker
 

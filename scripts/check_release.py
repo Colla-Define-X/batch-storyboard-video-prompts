@@ -21,6 +21,8 @@ REQUIRED_PATHS = (
     "requirements.txt",
     "agents/openai.yaml",
     "references/prompt-templates.md",
+    "references/creative-review-template.md",
+    "references/storyboard-prompt-review-template.md",
     "references/hybrid-coordination.md",
     "references/schema.md",
     "references/strict-mode.md",

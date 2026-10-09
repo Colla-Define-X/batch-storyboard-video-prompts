@@ -24,6 +24,10 @@ class PreparedHandoffTests(unittest.TestCase):
     def project(self, name="new", shots=2, scope="storyboard_and_video_prompt"):
         root = self.base / name
         w.init_project(root, name, shots, delivery=scope)
+        # Existing prepared-prompt projects must retain their old first-launch gate.
+        manifest = w.read_json(root / "project.json")
+        manifest["workflow"]["handoff_model"] = w.PREPARED_PROMPT_HANDOFF
+        w.write_json(root / "project.json", manifest)
         return root
 
     def data(self, root, sid="shot-01"):
@@ -36,7 +40,7 @@ class PreparedHandoffTests(unittest.TestCase):
                          encoding="utf-8")
         return w.save_content(root, relative, draft, w.content_revision(root, relative))
 
-    def test_new_launch_needs_every_staged_prompt_prepared_atomically(self):
+    def test_prepared_launch_needs_every_staged_prompt_prepared_atomically(self):
         root = self.project()
         self.assertEqual(w.read_json(root / "project.json")["workflow"]["handoff_model"],
                          "prepared_prompt_to_shot")

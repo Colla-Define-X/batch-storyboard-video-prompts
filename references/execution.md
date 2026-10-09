@@ -23,24 +23,28 @@ python scripts/workflow.py save-content PROJECT shots/shot-01/shot.json --from-f
 python scripts/workflow.py init PROJECT --name "产品展示"
 ```
 
-默认1张、4秒、分镜图加匹配的视频提示词；单张在当前对话执行。只有用户明确说“只要分镜图”或“不要视频提示词”时才增加 `--delivery storyboard_only`；明确需要多张时增加 `--shots N`。新项目带 `workflow.handoff_model: prepared_prompt_to_shot`，仅多张分阶段镜头采用下面的新交接：总控准备初版完整提示词，子对话接手审核和后续制作。单张、快速镜头仍在当前对话。没有此标记的已有项目继续原来的总控审核/视频路线，即使尚未选择并发也不自动转换。已有项目不能重新 init；读取现有清单继续。
+默认1张、4秒、分镜图加匹配的视频提示词；单张在当前对话执行。只有用户明确说“只要分镜图”或“不要视频提示词”时才增加 `--delivery storyboard_only`；明确需要多张时增加 `--shots N`。新项目带 `workflow.handoff_model: creative_plan_to_shot`：总控确认整批创意并准备共享规范与参考图分配，多张分阶段镜头由子对话编写完整技术提示词、审核并继续制作。单张、快速镜头仍在当前对话。已有 `prepared_prompt_to_shot` 项目保留总控准备完整初版、询问全部/试做后交接的路线；没有交接标记的已有项目保留总控审核/视频路线。即使旧项目尚未选择并发，也不自动转换标记。已有项目不能重新 init；读取现有清单继续。
 
-新项目先填写 `content-plan.json`：判断故事、产品展示或混合形式；核实产品事实；内部规划整批；默认逐张向用户展示场景、主卖点和四句简短画面并确认。卖点过多时先讨论优先级，信息不足时不编造功能或故事。新多张分阶段项目在创意确认后，由总控完成**每张**初版 `storyboard-prompt.md`、对应 `shot.json` 内容和 `check-prompt-plan`，全部准备好才询问“全部开始还是先做 1–2 张”并创建子对话。明确快速模式仍要内部规划；普通“生成”不跳过确认。
+新项目先填写 `content-plan.json`：判断故事、产品展示或混合形式，核实产品事实，规划整批并写全各张六列四格设计。卖点过多时先讨论优先级，信息不足时不编造功能或故事。展示前检查逐格作用、四格内部重复与整批叙事/动作重复；按 [创意展示模板](creative-review-template.md) 分块展示整体方向、整批总览和逐张四格表，最后取得范围明确的整批确认，允许用户点名修改局部。先导入实际参考图，在各 `shot.json.references` 分配真实 ID 与用途，并完成实际 `shared-brief.md`，不能把初始化占位文字当成完成稿。新多张分阶段项目整批创意获批后默认全部建立子对话，不额外询问是否试做；用户主动要求试做时按其范围执行。此时不要求总控已写技术提示词。明确快速模式仍要内部规划；普通“生成”不跳过确认。
 
-单张由当前对话编写并核对技术提示词。新多张分阶段项目由总控完成各初版提示词及整批核对，子对话接到完整文件后不要重新起稿；在**该子对话**提交当前提示词审核，展示简明四格方案并用本地文件链接提供完整提示词。用户在看到两者后的明确确认才批准该镜头当前版本；此后该子对话继续图片、QA、视频提示词和交付，不按常规回主对话审核或汇总。已有无标记项目保留“子任务写初稿、总控核对并提交提示词审核、总控完成视频”的原流程。此前的创意方向确认、并发选择和沉默均不算提示词批准。
+单张由当前对话编写并核对技术提示词。新多张分阶段项目的子对话读取整批规划和本张已批设计，编写完整提示词与对应镜头数据，实际核对后记录 `check-prompt-plan`；在**该子对话**按 [提示词展示模板](storyboard-prompt-review-template.md) 展示实际参考图、六列四格表、设计差异和完整提示词文件链接。用户在看到这些内容后的明确确认才批准该镜头当前版本；此后该子对话继续图片、QA、视频提示词和交付，不按常规回主对话审核或汇总。已有 prepared 项目接续已准备的初稿，不重新起稿；已有无标记项目保留“子任务写初稿、总控核对并提交提示词审核、总控完成视频”的原流程。此前的创意确认、启动选择和沉默均不算提示词批准。
 
 ## 创意版本确认与提示词交接
 
-规划文件先填写设计内容，不手填批准记录。逐张展示之前运行：
+初版准备时，将实际采用的摄影风格和同场景灯光规则写入 `shared-brief.md`，并保持每张完整提示词与 `review_style` 一致。没有用户指定风格、专门的风格/灯光参考或既有批准方案时，采用真实手机摄影质感；同场景四格及相关分镜保持主要光源、色温、曝光和阴影逻辑协调，跨场景允许自然变化。只提供产品身份参考，不等于要求照搬照片的摄影风格。具体描述见 [摄影与灯光默认规则](prompt-templates.md#photography-and-lighting-defaults)。
+
+逐段判断设计中的人物/产品动作。对没有主体动作、也未安排镜头运动的展示段，安排一种轻缓且服务卖点的拉近、拉远或左右移动；保留显式要求或已批准的固定机位、原切点及结尾，允许短暂停稳。不能把“分镜参考是静态图片”当作所有段落都没有动作，也不能用运镜虚构产品旋转、开合或不可见结构。新流程由总控在创意的镜头安排中确认运动意图，再由子对话写入对应 `camera` 计划和技术提示词；已有 prepared 项目仍由总控准备初版，其余模式维持原分工，不新增确认轮次。
+
+规划文件先填写设计内容，不手填批准记录。六列内容存入现有 `panel_beats` 分项文本和 `shot_scales`，填写方法见 [六列内容存储规则](schema.md#six-column-creative-content-without-new-fields)。不能只把人物动作、视角和镜头安排写在聊天表格里而漏出批准绑定。整批展示前对每张本轮待确认设计分别运行下列命令；恢复任务时不重建仍有效的审核或批准：
 
 ```bash
 python scripts/workflow.py prepare-design-review PROJECT shot-01
 ```
 
-把简短场景、主卖点、四格内容展示给用户；审核标识只供内部记录。得到对该版设计的回复后：
+按创意模板展示整批总览及每张四格表；审核标识只供内部记录。用户明确批准全部已展示设计时，可以用同一条真实整批回复逐张批准对应的本轮审核 ID；若只确认部分，不批准未确认镜头。普通整批启动等待其余设计也获批，不把局部确认自动解释为试做。逐张记录示例：
 
 ```bash
-python scripts/workflow.py approve-design PROJECT shot-01 --review-id DESIGN_ID --confirmation "用户对本张设计的实际回复"
+python scripts/workflow.py approve-design PROJECT shot-01 --review-id DESIGN_ID --confirmation "用户明确批准包含本张在内的已展示整批设计的实际回复"
 ```
 
 这两条命令落实原有的创意确认，不增加一轮用户问答。设计内容变化后旧标识失效；保存旧确认文字不能放行。记录保存在对应 `shot.json` 的 `design_review` 和 `design_approvals`，`content-plan.json` 的确认文字仅作可读摘要。明确快速模式时先记录 `set-mode ... fast --reason ...`，设置该张 `approval_source: explicit_fast_request`，再内部准备并以实际跳过请求记录设计授权，不向用户索取额外设计批准。
@@ -49,7 +53,7 @@ python scripts/workflow.py approve-design PROJECT shot-01 --review-id DESIGN_ID 
 
 负责编写的对话按已确认设计逐字填写 `review_context`、`review_selling_point`、`review_purpose`，并按左上、右上、左下、右下顺序填写四格：`description` 对应 `panel_beats`，`shot_scale` 对应 `shot_scales`，`plan_panel_id` 使用本镜头 ID 加 `:panel-1` 至 `:panel-4`（例如第二张为 `shot-02:panel-1`）。技术补充另写，不替换核心描述。完整提示词包含场景、目的、卖点、风格、各格核心描述、时间、标签和对应中文景别（wide=全景、medium=中景、close=近景、macro=微距）。
 
-新多张分阶段项目由总控在交接前实际核对每张初版提示词与规划、各格景别和整批动作是否一致，再逐张记录；单张/快速模式由当前对话负责，已有无标记项目仍由总控在收到子任务初稿后负责：
+新多张分阶段项目由子对话写好本张初版后，实际核对六列设计、逐格作用、格内与整批差异、提示词与规划及各格景别是否一致，再记录本张核对；已有 prepared 项目仍由总控在交接前核对初版，单张/快速模式由当前对话负责，已有无标记项目仍由总控在收到子任务初稿后负责：
 
 ```bash
 python scripts/workflow.py check-prompt-plan PROJECT shot-01 --note "本次核对的具体结论，包括与其他分镜的区别"
@@ -61,23 +65,23 @@ python scripts/workflow.py check-prompt-plan PROJECT shot-01 --note "本次核�
 python scripts/workflow.py add-source PROJECT ORIGINAL_PHOTO --id image-01
 ```
 
-填写 `shared-brief.md` 和 `content-plan.json`；新项目的计划结构见 [schema.md](schema.md)。新多张分阶段项目由总控在并发选择前保存每张 `shots/<shot-id>/storyboard-prompt.md`，按该设计填写各 `shot.json` 的参考图、四段时间、标签、可见画面、运镜、不变量、`sequence_type`、`review_style` 和 `review_selling_point`；单张/快速仍由当前对话填写，无标记旧项目维持原分工。完整提示词中须逐字包含这两项和四格的时间、标签、核心画面描述；可在其后补充摄影和生成约束。脚本检查内容规划、文件和哈希；初版编写者仍须检查近义动作与整体叙事冲突。生成后的视觉 QA 照旧执行。
+总控在创意交接前完成 `shared-brief.md`、`content-plan.json` 和每张实际参考图分配；计划结构见 [schema.md](schema.md)。新多张分阶段项目的子对话随后保存本张 `shots/<shot-id>/storyboard-prompt.md`，按已批设计填写 `shot.json` 的四段时间、标签、可见画面、运镜、不变量、`sequence_type`、`review_style` 和 `review_selling_point`。已有 prepared 项目仍由总控在并发选择前完成这些初稿；单张/快速由当前对话填写，无标记旧项目维持原分工。完整提示词须逐字包含风格、卖点和四格的时间、标签、完整核心描述，不得丢弃六列对应的分项文字；可在其后补充摄影和生成约束。脚本检查内容规划、文件和哈希；初版编写者仍须检查近义动作与整体叙事冲突。生成后的视觉 QA 照旧执行。
 
 ## 分阶段执行
 
-用户确认提示词前只进入待审核状态。新多张分阶段项目由总控在初版文件与本张 `check-prompt-plan` 就绪后、选择并发前逐张进入此状态；初次 `set-concurrency` 和首次任务登记还会检查完整当前提示词与核对记录，但不会代替用户批准：
+新创意交接可在 `todo` 或 `storyboard_prompt_pending` 创建子对话；首次启动与登记检查创意批准、共享规范和实际参考图，不要求已有完整技术提示词。子对话写好初版及本张 `check-prompt-plan` 后进入待审核状态，不得凭创意批准生图。已有 prepared 项目仍由总控在初稿及核对记录就绪后、选择并发前逐张进入此状态，其首次启动与登记仍检查完整提示词：
 
 ```bash
 python scripts/workflow.py status PROJECT shot-01 storyboard_prompt_pending
 ```
 
-保存方案后，先准备本镜头的审核记录。新多张分阶段项目由已登记真实 `threadId`（及可用 `hostId`）的子对话执行；若子对话先启动，必须等总控登记并告知本任务自己的身份，不能提前提交第一次审核。单张/快速仍在当前对话；无标记旧项目按原路径由总控准备：
+保存方案后，先准备本镜头的审核记录。两种有交接标记的多张分阶段项目均由已登记真实 `threadId`（及可用 `hostId`）的子对话执行；若子对话先启动，必须等总控登记并告知本任务自己的身份，不能提前提交第一次审核。单张/快速仍在当前对话；无标记旧项目按原路径由总控准备：
 
 ```bash
 python scripts/workflow.py prepare-prompt-review PROJECT shot-01
 ```
 
-把命令输出的简明方案放进对话，并附上 `shots/shot-01/storyboard-prompt.md` 的绝对路径 Markdown 文件链接。核对用户的回复确实发生在该方案和文件链接展示之后，且确认的是本镜头当前版本；需要修改时先修订内容，再重新运行准备命令。用户明确确认后：
+新流程按提示词展示模板，将当前审核所绑定的实际方案展示为六列四格表，同时展示实际参考图与用途、设计差异，并附上 `shots/shot-01/storyboard-prompt.md` 的绝对路径 Markdown 文件链接。摘要不得与完整文件不同；旧项目不为切换展示格式重建有效审核或改写批准内容。核对用户的回复确实发生在方案和文件链接展示之后，且确认的是本镜头当前版本；需要修改时先修订内容，再重新运行准备命令。用户明确确认后：
 
 ```bash
 python scripts/workflow.py approve PROJECT shot-01 storyboard_prompt --review-id REVIEW_ID --confirmation "用户对本镜头当前方案和提示词的确认原话"
@@ -125,7 +129,7 @@ python scripts/storyboard_layout.py PROJECT/shots/shot-01/shot.json PROJECT/shot
 
 脚本要求9:16画布、四个面板与标签，自动统一缩小过长标签的字号，过长到无法阅读则报错；默认拒绝覆盖任何已有输出。如果原图分格不均匀，不使用等分裁切冒充正确结果；先处理布局问题并遵循用户的重试决定。拆分和排版属于布局处理，不用它们改变主体图像内容。
 
-检查裁切未丢失主体、四格完整、标签无错误且不遮挡重点。记录 `qa.result=pass` 或 `pass_with_notes` 与具体偏差。严重失败时，分阶段镜头进入 `generation_failed`，快速模式镜头进入 `failed`；不自动再次生图。
+检查裁切未丢失主体、四格完整、标签无错误且不遮挡重点，同时检核实际选定的摄影质感及同场景光线一致性。默认手机摄影时，检查自然材质、细节、合理景深及是否有过度磨皮/塑料感；其他明确风格按其已确认要求检查，不因不是手机实拍就判失败。光线检核不强求跨场景或换机位后的阴影在画面上完全相同。记录 `qa.result=pass` 或 `pass_with_notes` 与具体偏差。严重失败时，分阶段镜头进入 `generation_failed`，快速模式镜头进入 `failed`；不自动再次生图，也不增加审核环节。
 
 ```bash
 python scripts/workflow.py status PROJECT shot-01 storyboard_review_pending
@@ -142,6 +146,8 @@ python scripts/workflow.py approve PROJECT shot-01 storyboard --review-id ARTIFA
 组合项目继续：依据获批图片写 `video-prompt.md`，执行 `status ... video_prompt_review_pending`，展示后等待批准，再 `approve ... video_prompt --review-id ARTIFACT_ID --confirmation "本版确认原话"`。新多张分阶段项目由**同一镜头子对话**完成这些步骤和交付；图片获批会释放生图活动槽位，但保留该子对话的 thread/host，视频阶段无需重新登记或 preflight。单张/快速仍在当前对话；无标记旧多张分阶段项目继续由总控完成视频提示词。缺文件或图片哈希变化时不能完成。
 
 ### 产物审核版本
+
+编写视频提示词时，按 [静止展示段落运镜规则](prompt-templates.md#motion-in-static-display-segments) 检查各段，而不是只检查整条是否静止。兼容已确认镜头计划的方向、幅度和终点细化只写入 `video-prompt.md`，随后在已有的视频或快速包审核中确认；已有运动不重复叠加。不要在图片获批后回写 `shot.json` 的 `camera`、`sequence_type`、四格或共享规范来套用新默认，这些内容参与既有批准绑定。已批准的固定机位直接保留，不因新默认要求修订；只有新要求与已批准设计不兼容时，才说明冲突并按已有修订流程确认。不偷偷覆盖、不默认重生图片、不批量更新历史项目。
 
 进入 `storyboard_review_pending`、`video_prompt_review_pending` 或 `review_pending` 时，命令自动保存 `artifact_review` 并输出审核 ID。先记录版本，再展示对应产物和 QA；批准时带上该 ID 及随后得到的真实回复。ID 只供内部记录，不要求用户理解或输入。图片、视频文本、QA 或绑定输入变化后不能沿用旧回复。
 
@@ -203,7 +209,7 @@ python scripts/workflow.py revise-designs PROJECT shot-01 shot-02 --reason "用�
 
 凡实际新建镜头对话，默认继承主对话当前实际 Codex 项目归属；明确无项目则同样无项目。创建前核实归属、创建后按真实对话 ID 核对成功，才登记任务和交接身份，具体工具参数见 [项目继承与创建核对](hybrid-coordination.md#project-membership-when-creating-conversations)。本地桌面用 `chat_membership.py --thread-id <真实ID> --host-id local` 只读查询应用明确归属；列表空值不能单独证明无项目，列表漏项也不能否定已核实的明确归属。此规则覆盖全部开始、试做、后续批次、经授权的替代对话和无标记旧项目，不改变单张/快速模式不创建子对话的默认路径。归属未知或项目不可用时不擅自选其他项目；不得用文件目录或侧边栏分组代替归属核对，也不自动迁移已有对话。只读适配器不修改应用状态或分镜状态机。
 
-单张禁止 `set-concurrency` 和 `register-task`。多张分阶段制作按 [hybrid-coordination.md](hybrid-coordination.md) 创建独立镜头对话并行推进；暂不使用单对话管理多张图各自的分阶段审核。多张快速请求使用上文的当前对话集中路径。新项目的 `workflow.handoff_model: prepared_prompt_to_shot` 仅在多张分阶段镜头上启用：总控初版准备完成后首次 `set-concurrency`，此时设置 `video_prompt_owner: shot_task`；无标记旧项目的并发选择保留 `video_prompt_owner: coordinator` 和原提示词分工。这里的 owner 是工作流分工说明，不是新增权限系统。分阶段并发时，每个镜头有一个内容维护者，公共设置由总控对话管理。状态与批准命令通过项目锁更新镜头和项目摘要。
+单张禁止 `set-concurrency` 和 `register-task`。多张分阶段制作按 [hybrid-coordination.md](hybrid-coordination.md) 创建独立镜头对话并行推进；暂不使用单对话管理多张图各自的分阶段审核。多张快速请求使用上文的当前对话集中路径。新 `creative_plan_to_shot` 项目在整批创意确认后默认执行 `set-concurrency PROJECT all`，不再增加“全部还是试做”的问题；用户主动要求试做时记录 `pilot --count 1|2`。已有 `prepared_prompt_to_shot` 项目维持总控初稿就绪后询问并记录全部/试做。两种标记的多张分阶段启动均设置 `video_prompt_owner: shot_task`；无标记旧项目保留 `video_prompt_owner: coordinator` 和原提示词分工。这里的 owner 是工作流分工说明，不是新增权限系统。分阶段并发时，每个镜头有一个内容维护者，公共设置由总控对话管理。状态与批准命令通过项目锁更新镜头和项目摘要。
 
 整批选择并发时检查完整规划；之后每张任务登记、提示词审核与生成只检查本张和公共依赖，不因另一张未完成的草稿而阻塞。共同内容形式或关系变更仍会使相关批准过期。混合模式时只为 staged 镜头登记任务，fast 镜头留在当前对话；全 fast 项目拒绝设置并发。活动任务切换 fast 前先释放槽位。
 

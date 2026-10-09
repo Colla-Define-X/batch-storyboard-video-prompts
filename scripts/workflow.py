@@ -23,6 +23,7 @@ DESIGN_FIELDS = ("shot_id", "context", "primary_selling_point", "purpose", "pane
 ASSET_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 PREPARED_PROMPT_HANDOFF = "prepared_prompt_to_shot"
+CREATIVE_PLAN_HANDOFF = "creative_plan_to_shot"
 
 FAST_STATUSES = ("todo", "running", "review_pending", "complete", "failed")
 STAGED_STATUSES = (
@@ -291,13 +292,13 @@ def init_project(root: Path, name: str, shots: int = 1, duration: float = 4, del
             "reading_order": list(POSITIONS),
             "time_boundaries_seconds": boundaries,
             "time_ranges": format_time_ranges(boundaries),
-            "video_resolution": "1080p", "audio": "无对白、无旁白、仅极轻环境声",
+            "video_resolution": "720p", "audio": "无对白、无旁白、仅极轻环境声",
         },
         "workflow": {
             "default_review_mode": "staged", "cross_shot_parallel": False,
             "approval": "storyboard_prompt_then_storyboard_then_video_prompt",
             "execution_model": "current_conversation",
-            "handoff_model": PREPARED_PROMPT_HANDOFF,
+            "handoff_model": CREATIVE_PLAN_HANDOFF,
             "parallel_launch_mode": None,
             "max_parallel_shot_tasks": None,
             "content_plan_required": True,
@@ -558,6 +559,44 @@ def uses_prepared_handoff(project: dict) -> bool:
     return project.get("workflow", {}).get("handoff_model") == PREPARED_PROMPT_HANDOFF
 
 
+def uses_creative_handoff(project: dict) -> bool:
+    return project.get("workflow", {}).get("handoff_model") == CREATIVE_PLAN_HANDOFF
+
+
+def uses_shot_handoff(project: dict) -> bool:
+    return uses_prepared_handoff(project) or uses_creative_handoff(project)
+
+
+def reference_hashes(root: Path, project: dict, data: dict) -> dict:
+    validate_assets(root, project)
+    refs = data.get("references", [])
+    assets = {a["id"]: a for a in project.get("assets", [])}
+    if not refs or any(r.get("id") not in assets or not r.get("roles") for r in refs):
+        raise ValueError("Every shot requires valid reference IDs and roles")
+    if len({r["id"] for r in refs}) != len(refs):
+        raise ValueError("Duplicate shot references")
+    return {r["id"]: assets[r["id"]]["sha256"] for r in refs}
+
+
+def require_creative_handoff(root: Path, project: dict, data: dict) -> None:
+    """Hand off approved design and source material, not a technical prompt."""
+    if data.get("status") not in {"todo", "storyboard_prompt_pending"}:
+        raise ValueError(f"Prepare {data['shot_id']} in a drafting state before initial handoff")
+    if content_plan(root, project, data["shot_id"]) is None:
+        raise ValueError("Creative handoff requires a version-approved content plan")
+    validate_boundaries(project["defaults"])
+    reference_hashes(root, project, data)
+    brief = inside(root, project["workflow"]["shared_brief_path"])
+    file_hash(brief, text=True)
+
+
+def require_initial_handoff(root: Path, project: dict, data: dict) -> None:
+    if uses_creative_handoff(project):
+        require_creative_handoff(root, project, data)
+    elif uses_prepared_handoff(project):
+        require_prepared_prompt(root, project, data)
+
+
 def require_prepared_prompt(root: Path, project: dict, data: dict) -> None:
     """Check an initial handoff without approving the prompt on the user's behalf."""
     if data.get("status") != "storyboard_prompt_pending":
@@ -584,13 +623,7 @@ def input_binding(root: Path, project: dict, data: dict) -> dict:
     folder = shot_json_path(root, data["shot_id"]).parent
     plan = content_plan(root, project, data["shot_id"])
     validate_boundaries(project["defaults"])
-    validate_assets(root, project)
-    refs = data.get("references", [])
-    assets = {a["id"]: a for a in project.get("assets", [])}
-    if not refs or any(r.get("id") not in assets or not r.get("roles") for r in refs):
-        raise ValueError("Every shot requires valid reference IDs and roles")
-    if len({r["id"] for r in refs}) != len(refs):
-        raise ValueError("Duplicate shot references")
+    sources = reference_hashes(root, project, data)
     panels = data.get("panels", [])
     if len(panels) != 4:
         raise ValueError("Exactly four panel records are required before generation")
@@ -606,7 +639,7 @@ def input_binding(root: Path, project: dict, data: dict) -> dict:
         "settings": fingerprint({"defaults": project["defaults"], "scope": delivery_scope(project)}),
         "shot": fingerprint({key: data.get(key) for key in ("references", "camera", "must_keep", "forbidden", "sequence_type")}),
         "panels": fingerprint([{k: v for k, v in panel.items() if k != "image"} for panel in panels]),
-        "sources": {r["id"]: assets[r["id"]]["sha256"] for r in refs},
+        "sources": sources,
     }
     if plan is not None:
         check_plan_alignment(plan, data)
@@ -663,7 +696,7 @@ def prepare_prompt_review(root: Path, shot_id: str) -> str:
     data = read_json(path)
     if review_mode_for(data) != "staged" or data.get("status") != "storyboard_prompt_pending":
         raise ValueError("Prompt review requires a staged shot awaiting prompt confirmation")
-    if uses_prepared_handoff(project) and len(project["shots"]) > 1 and not row.get("task", {}).get("thread_id"):
+    if uses_shot_handoff(project) and len(project["shots"]) > 1 and not row.get("task", {}).get("thread_id"):
         raise ValueError("Register the actual shot task before its initial prompt review")
     binding = input_binding(root, project, data)
     summary = prompt_review_summary(data)
@@ -799,6 +832,8 @@ def check_launch_permission(project: dict, data: dict, thread_id: str | None = N
     mode = workflow.get("parallel_launch_mode")
     maximum = workflow.get("max_parallel_shot_tasks")
     if mode not in {"all", "pilot"} or type(maximum) is not int or maximum < 1:
+        if uses_creative_handoff(project):
+            raise ValueError("Record the batch launch after creative approval before generation")
         raise ValueError("Record the user's concurrency choice before generation")
     if (mode == "pilot" and maximum not in {1, 2}) or (mode == "all" and maximum != len(project["shots"])):
         raise ValueError("Invalid authorized concurrency limit")
@@ -1120,11 +1155,11 @@ def set_concurrency(root: Path, mode: str, pilot_count: int | None = None, reaso
     workflow = project.setdefault("workflow", {})
     if workflow.get("parallel_launch_mode") is not None and (not reason or not reason.strip()):
         raise ValueError("Continuing or changing the launch choice requires the user's explicit --reason")
-    if uses_prepared_handoff(project) and workflow.get("parallel_launch_mode") is None:
+    if uses_shot_handoff(project) and workflow.get("parallel_launch_mode") is None:
         for row in project["shots"]:
             data = read_json(shot_json_path(root, row["id"]))
             if review_mode_for(data) == "staged":
-                require_prepared_prompt(root, project, data)
+                require_initial_handoff(root, project, data)
     if mode == "all":
         maximum = shots
     elif mode == "pilot":
@@ -1136,7 +1171,7 @@ def set_concurrency(root: Path, mode: str, pilot_count: int | None = None, reaso
     workflow["execution_model"] = "coordinator_with_shot_slots"
     workflow["cross_shot_parallel"] = True
     workflow["one_visible_task_per_shot"] = True
-    workflow["video_prompt_owner"] = "shot_task" if uses_prepared_handoff(project) else "coordinator"
+    workflow["video_prompt_owner"] = "shot_task" if uses_shot_handoff(project) else "coordinator"
     workflow["parallel_launch_mode"] = mode
     workflow["max_parallel_shot_tasks"] = maximum
     workflow["pilot_shot_ids"] = [] if mode == "pilot" else None
@@ -1170,13 +1205,16 @@ def register_task(root: Path, shot_id: str, thread_id: str, host_id: str | None)
         workflow = project.get("workflow", {})
         maximum = workflow.get("max_parallel_shot_tasks")
         if workflow.get("parallel_launch_mode") not in {"all", "pilot"} or maximum is None:
+            if uses_creative_handoff(project):
+                raise ValueError("Launch is not recorded; after batch creative approval run set-concurrency all, "
+                                 "or record the user's explicit pilot request")
             raise ValueError(
                 "Concurrency choice is not recorded; ask whether to start all shots or pilot 1-2, "
                 "then run set-concurrency"
             )
         content_plan(root, project, shot_id)
-        if uses_prepared_handoff(project) and not current_task.get("thread_id"):
-            require_prepared_prompt(root, project, latest)
+        if uses_shot_handoff(project) and not current_task.get("thread_id"):
+            require_initial_handoff(root, project, latest)
         active = sum(
             1 for item in project["shots"]
             if item["id"] != shot_id and item.get("task", {}).get("active") is True
@@ -1280,10 +1318,11 @@ def task_brief(root: Path, shot_id: str) -> str:
     latest = read_json(shot_path) if shot_path.is_file() else shot
     status = latest.get("status")
     local = len(project["shots"]) == 1 or review_mode_for(latest) == "fast"
-    prepared_child = uses_prepared_handoff(project) and not local
-    first_handoff = prepared_child and not shot.get("task", {}).get("thread_id")
+    shot_child = uses_shot_handoff(project) and not local
+    creative_child = uses_creative_handoff(project) and not local
+    first_handoff = shot_child and not shot.get("task", {}).get("thread_id")
     if first_handoff:
-        require_prepared_prompt(root, project, latest)
+        require_initial_handoff(root, project, latest)
     review_state = None
     if status == "storyboard_prompt_pending" and latest.get("prompt_review"):
         try:
@@ -1301,7 +1340,7 @@ def task_brief(root: Path, shot_id: str) -> str:
     elif status == "complete":
         next_step = "请求范围已完成；仅按用户新的修改要求继续。"
     elif status in {"video_prompt_pending", "video_prompt_review_pending"}:
-        if prepared_child or local:
+        if shot_child or local:
             next_step = ("在本对话依据已批准并冻结的分镜图编写视频提示词，完成后提交用户审核。"
                          if status == "video_prompt_pending" else
                          "视频提示词已提交；在本对话等待用户对当前版本的确认，不要重新编写。")
@@ -1332,7 +1371,7 @@ def task_brief(root: Path, shot_id: str) -> str:
     plan = None
     # An assigned child must be able to resume its own creative revision before
     # its new design has been approved. Initial handoffs were checked above.
-    if prepared_child and status in {"todo", "storyboard_prompt_pending"}:
+    if shot_child and status in {"todo", "storyboard_prompt_pending"}:
         try:
             plan = content_plan(root, project, shot_id, require_approved=False)
         except (ValueError, FileNotFoundError, KeyError):
@@ -1353,25 +1392,31 @@ def task_brief(root: Path, shot_id: str) -> str:
         plan = content_plan(root, project, shot_id)
     root = root.resolve()
     assignment = next((item for item in plan["shots"] if item["shot_id"] == shot_id), None) if plan else None
-    plan_line = f"- {root / 'content-plan.json'} 中 {shot_id} 的分工与确认记录\n" if assignment else ""
+    plan_line = f"- {root / 'content-plan.json'} 中 {shot_id} 的分工与确认记录，以及整批分工和其他镜头设计（仅用于避重，不改写）\n" if assignment else ""
     assignment_line = ""
-    if prepared_child:
+    if shot_child:
         delivery_work = "视频提示词及交付" if delivery_scope(project) == "storyboard_and_video_prompt" else "图片交付"
         assignment_line = (
             f"本子对话独立负责本镜头的提示词确认与修改、生图、标签、QA、图片审核及{delivery_work}；不回主对话汇总或审核。\n"
             "局部创意修改只更新 content-plan.json 的本镜头条目，保留其他条目和全局字段；使用现有整文件版本校验保存，冲突时重读合并。"
             "涉及全局或其他镜头的修改应先另行协调，不自行扩大范围。\n"
         )
+        if creative_child:
+            assignment_line += ("保留 panel_beats 中逐格的画面与产品状态／动作、人物动作、视角、镜头安排、本格作用，"
+                                "并逐字继承 shot_scales；按统一六列模板展示，不省略人物动作。\n")
         if not design_pending and drafting:
             try:
                 require_prepared_prompt(root, project, latest)
                 next_step = "当前完整提示词和四格数据已准备好；不要重写。运行 prepare-prompt-review，在本子对话展示并等待用户确认；批准前不得生图。"
             except (ValueError, FileNotFoundError, KeyError):
-                next_step = "按用户明确要求在本子对话补齐或修改提示词和四格数据，执行 check-prompt-plan 核对当前创意及跨镜头避重，再提交提示词确认；不需要主对话复核。"
+                next_step = (("依据已批准的完整创意在本子对话编写初版提示词和四格数据；已有草稿先读取，保留仍有效的内容。"
+                              if creative_child else "按用户明确要求在本子对话补齐或修改提示词和四格数据，") +
+                             "执行 check-prompt-plan 核对当前创意及跨镜头避重，进入 storyboard_prompt_pending 后提交提示词确认；不需要主对话复核，批准前不得生图。")
         elif not design_pending and review_state == "stale":
             next_step += " 在本子对话核对当前提示词并执行 check-prompt-plan 后重新提交，不需要主对话复核。"
         if first_handoff:
-            next_step = ("完整初稿已交接；先等待总控登记真实任务 ID 并告知本任务自己的身份，再开始本子对话的提示词展示与确认。"
+            next_step = (("完整创意已交接，技术提示词由本子对话编写；" if creative_child else "完整初稿已交接；") +
+                         "先等待总控登记真实任务 ID 并告知本任务自己的身份，再开始本子对话的提示词准备与确认。"
                          "登记前不要运行 prepare-prompt-review 或 approve；登记后重新读取 task-brief，已有有效审核记录则复用，不要重建。")
     elif assignment:
         responsible = "当前对话" if local else "总控"
@@ -1384,12 +1429,16 @@ def task_brief(root: Path, shot_id: str) -> str:
     identity_hint = ("多张分阶段生图须使用本任务自己的 thread_id 和 host_id（如有）。"
                      "总控在创建并登记任务后单独告知；未收到前不要调用 preflight，"
                      "也不要从 project.json 抄当前登记的负责人作为调用身份。\n") if not local else ""
-    prompt_hint = ("（已交接初稿；仅按用户明确修改要求修订）" if prepared_child else
+    prompt_hint = ("（已交接初稿；仅按用户明确修改要求修订）" if shot_child and not creative_child else
                    "（缺失先按模板保存）" if drafting else "（只读；遵循当前状态）")
+    template_line = (f"- {Path(__file__).resolve().parents[1] / 'references' / 'storyboard-prompt-review-template.md'}\n"
+                     f"- {Path(__file__).resolve().parents[1] / 'references' / 'prompt-templates.md'}\n"
+                     if creative_child else "")
     result = (
         f"处理 {shot_id}。\n\n读取：\n"
         f"- {Path(__file__).resolve().parents[1] / 'SKILL.md'}\n"
         f"- {Path(__file__).resolve().parents[1] / 'references' / 'execution.md'}\n"
+        f"{template_line}"
         f"- {root / 'shared-brief.md'}\n"
         f"{plan_line}"
         f"- {root / 'shots' / shot_id / 'shot.json'}\n"
@@ -1471,7 +1520,7 @@ def validate_workflow(root: Path, project: dict) -> None:
         raise ValueError("parallel_launch_mode must be null, all, or pilot")
     if workflow.get("retry_policy") != "explicit_user_request_only":
         raise ValueError("Schema v4 requires explicit-user retry policy")
-    if "handoff_model" in workflow and workflow["handoff_model"] != PREPARED_PROMPT_HANDOFF:
+    if "handoff_model" in workflow and workflow["handoff_model"] not in {PREPARED_PROMPT_HANDOFF, CREATIVE_PLAN_HANDOFF}:
         raise ValueError("Invalid handoff model")
     if workflow.get("video_prompt_owner") not in {"coordinator", "current_conversation", "shot_task"}:
         raise ValueError("Invalid video prompt owner")

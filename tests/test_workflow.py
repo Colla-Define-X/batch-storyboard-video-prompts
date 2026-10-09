@@ -345,11 +345,13 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at least 4 seconds"):
                 workflow.init_project(Path(directory) / "project", "demo", 1, 3)
 
-    def test_concurrency_requires_user_choice_and_supports_pilot(self) -> None:
+    def test_prepared_concurrency_requires_user_choice_and_supports_pilot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
             workflow.init_project(project, "demo", 3)
             manifest = json.loads((project / "project.json").read_text(encoding="utf-8"))
+            manifest["workflow"]["handoff_model"] = workflow.PREPARED_PROMPT_HANDOFF
+            workflow.write_json(project / "project.json", manifest)
             self.assertTrue((project / "shared-brief.md").is_file())
             self.assertIsNone(manifest["workflow"]["parallel_launch_mode"])
             self.assertIsNone(manifest["workflow"]["max_parallel_shot_tasks"])

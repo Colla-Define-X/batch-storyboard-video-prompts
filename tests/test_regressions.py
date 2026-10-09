@@ -159,6 +159,25 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(len(data['shots']),1)
         self.assertEqual(data['delivery_scope'],'storyboard_and_video_prompt')
         self.assertEqual(data['workflow']['execution_model'],'current_conversation')
+        self.assertEqual(data['defaults']['video_resolution'],'720p')
+
+    def test_explicit_video_resolution_survives_workflow_updates(self):
+        defaults = w.read_json(self.root/'project.json')['defaults']
+        defaults['video_resolution'] = '1080p'
+        draft = Path(self.temp.name)/'video-settings.json'
+        draft.write_text(json.dumps({'defaults': defaults}), encoding='utf-8')
+        w.save_content(self.root, 'project.json', draft, w.content_revision(self.root, 'project.json'))
+        w.set_review_mode(self.root, 'shot-01', 'fast', 'User explicitly requests fast mode')
+        self.assertEqual(w.read_json(self.root/'project.json')['defaults']['video_resolution'], '1080p')
+
+    def test_video_default_does_not_change_layout_cli_dimensions(self):
+        paths = [Path(self.temp.name)/'panel.png']*4
+        labels = ['panel']*4
+        with patch.object(sys, 'argv', ['storyboard_layout.py', 'shot.json', 'review.png']), \
+                patch.object(storyboard_layout, 'load_manifest', return_value=(paths, labels)), \
+                patch.object(storyboard_layout, 'compose') as compose:
+            storyboard_layout.main()
+        self.assertEqual(compose.call_args.args[3:5], (1080, 1920))
 
     def test_fast_switch_while_prompt_pending(self):
         self.pending()
